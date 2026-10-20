@@ -1,0 +1,2010 @@
+{% extends "base.html" %}
+
+{% block title %}{{ group.name }} - SplitSmart{% endblock %}
+
+{% block content %}
+<div id="groupMetadata" class="d-none" data-group-id="{{ group.id or 0 }}" data-currency="{{ group.currency or 'INR' }}"></div>
+<!-- Top Header -->
+<div class="mb-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3">
+        <div>
+            <a href="{{ url_for('groups.list_groups_view') }}" class="text-decoration-none text-muted small">
+                <i class="bi bi-arrow-left"></i> Back to all groups
+            </a>
+            <h2 class="fw-bold mt-1 mb-1">{{ group.name }}</h2>
+            {% if group.description %}
+                <p class="text-muted small mb-2">{{ group.description }}</p>
+            {% endif %}
+            <div class="d-flex flex-wrap gap-2 align-items-center mt-2">
+                {% set cat = group.category or 'Other' %}
+                {% if cat == 'Trip' %}
+                    <span class="badge bg-info-subtle text-info-emphasis border border-info-subtle"><i class="bi bi-airplane me-1"></i> Trip</span>
+                {% elif cat == 'Home / Roommates' %}
+                    <span class="badge bg-success-subtle text-success-emphasis border border-success-subtle"><i class="bi bi-house-door me-1"></i> Home / Roommates</span>
+                {% elif cat == 'Couple' %}
+                    <span class="badge bg-danger-subtle text-danger-emphasis border border-danger-subtle"><i class="bi bi-heart me-1"></i> Couple</span>
+                {% elif cat == 'Event' %}
+                    <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle"><i class="bi bi-calendar-event me-1"></i> Event</span>
+                {% else %}
+                    <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle"><i class="bi bi-people me-1"></i> {{ cat }}</span>
+                {% endif %}
+                {% if group.funding_mode in ('pooled_kitty', 'common_fund', 'kitty') %}
+                    <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle"><i class="bi bi-piggy-bank me-1"></i> Kitty Fund</span>
+                {% endif %}
+                <span class="badge bg-light text-dark border">Currency: {{ group.currency }}</span>
+                <span class="text-muted small ms-2">Invite Code: <code class="fw-bold fs-6">{{ group.invite_code or '' }}</code></span>
+                <button id="copyInviteBtn" class="btn btn-sm btn-outline-primary ms-1" data-invite-url="{{ url_for('groups.join_group_view', invite_code=(group.invite_code or 'code'), _external=True) if group.invite_code else '#' }}" onclick="copyInviteLink(this)">
+                    <i class="bi bi-clipboard"></i> Copy Invite Link
+                </button>
+            </div>
+        </div>
+        <!-- Action Buttons -->
+        <div class="d-flex flex-wrap gap-2 align-items-center">
+            <button class="btn btn-primary fw-semibold shadow-sm" data-bs-toggle="modal" data-bs-target="#addExpenseModal">
+                <i class="bi bi-plus-circle me-1"></i> Add Expense
+            </button>
+            <button class="btn btn-success fw-semibold shadow-sm" onclick="const bTab = document.getElementById('balances-tab'); if (bTab) { bootstrap.Tab.getOrCreateInstance(bTab).show(); bTab.scrollIntoView({ behavior: 'smooth' }); }">
+                <i class="bi bi-arrow-left-right me-1"></i> View Settle Plan
+            </button>
+            {% if group.funding_mode in ('pooled_kitty', 'common_fund', 'kitty') %}
+            <button class="btn btn-warning text-dark fw-semibold shadow-sm" data-bs-toggle="modal" data-bs-target="#contributeFundModal">
+                <i class="bi bi-piggy-bank-fill me-1"></i> Contribute to Kitty
+            </button>
+            {% endif %}
+            {% if group.created_by == session.get('user_id') %}
+            <form method="POST" action="{{ url_for('groups.delete_group_view', group_id=group.id) }}" class="d-inline" onsubmit="return confirm('Are you sure you want to delete this group? This action cannot be undone.');">
+                <button type="submit" class="btn btn-outline-danger fw-semibold shadow-sm" title="Delete Group">
+                    <i class="bi bi-trash3 me-1"></i> Delete Group
+                </button>
+            </form>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+{% if request.args.get('error') %}
+    <div class="alert alert-danger alert-dismissible fade show" role="alert">
+        {{ request.args.get('error') }}
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+    </div>
+{% endif %}
+
+{% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+        {% for category, message in messages %}
+            <div class="alert alert-{{ category if category != 'message' else 'info' }} alert-dismissible fade show" role="alert">
+                {{ message }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+        {% endfor %}
+    {% endif %}
+{% endwith %}
+
+<!-- Top Summary Cards -->
+<div class="row g-3 mb-4">
+    <div class="col-md-4">
+        <div class="card shadow-sm border-0 border-start border-primary border-4 p-3 bg-white">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <div class="text-muted small fw-semibold">TOTAL EXPENSES</div>
+                    <h3 class="fw-bold mb-0 text-dark">
+                        {{ group.currency }} {{ (((expenses or []) | sum(attribute='amount')) or 0) | round(2) }}
+                    </h3>
+                </div>
+                <div class="bg-primary-subtle text-primary p-3 rounded-circle">
+                    <i class="bi bi-receipt fs-4"></i>
+                </div>
+            </div>
+            <div class="text-muted small mt-2">{{ (expenses or []) | length }} expense(s) recorded</div>
+        </div>
+    </div>
+    
+    {% if group.funding_mode in ('pooled_kitty', 'common_fund', 'kitty') and fund_status %}
+    <div class="col-md-4">
+        <div class="card shadow-sm border-0 border-start {{ 'border-danger' if fund_status.has_deficit else 'border-success' }} border-4 p-3 bg-white">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <div class="text-muted small fw-semibold">COMMON KITTY BALANCE</div>
+                    <h3 class="fw-bold mb-0 {{ 'text-danger' if fund_status.has_deficit else 'text-success' }}">
+                        {{ group.currency }} {{ (fund_status.kitty_balance or 0) | round(2) }}
+                    </h3>
+                </div>
+                <div class="{{ 'bg-danger-subtle text-danger' if fund_status.has_deficit else 'bg-success-subtle text-success' }} p-3 rounded-circle">
+                    <i class="bi bi-piggy-bank fs-4"></i>
+                </div>
+            </div>
+            <div class="text-muted small mt-2">
+                Collected: {{ group.currency }} {{ (fund_status.total_contributed or 0) | round(2) }} • Spent: {{ group.currency }} {{ (fund_status.total_spent or 0) | round(2) }}
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="col-md-4">
+        <div class="card shadow-sm border-0 border-start border-info border-4 p-3 bg-white">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <div class="text-muted small fw-semibold">TOTAL MEMBERS</div>
+                    <h3 class="fw-bold mb-0 text-dark">{{ (members or []) | length }}</h3>
+                </div>
+                <div class="bg-info-subtle text-info p-3 rounded-circle">
+                    <i class="bi bi-people fs-4"></i>
+                </div>
+            </div>
+            <div class="text-muted small mt-2">{{ (unclaimed or []) | length }} unclaimed placeholder(s)</div>
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="col-md-4">
+        <div class="card shadow-sm border-0 border-start border-warning border-4 p-3 bg-white">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <div class="text-muted small fw-semibold">ACTIVE SETTLEMENT STEPS</div>
+                    <h3 class="fw-bold mb-0 text-warning-emphasis">
+                        {{ balances.settlement_plan | length if balances and balances.settlement_plan else 0 }}
+                    </h3>
+                </div>
+                <div class="bg-warning-subtle text-warning-emphasis p-3 rounded-circle">
+                    <i class="bi bi-arrow-left-right fs-4"></i>
+                </div>
+            </div>
+            <div class="text-muted small mt-2">
+                {% if balances and balances.settlement_plan %}
+                    Minimum repayments to settle up
+                {% else %}
+                    All balances are currently settled! 🎉
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Main Navigation Tabs -->
+<ul class="nav nav-pills mb-4 gap-2 bg-white p-2 rounded shadow-sm" id="groupTabs" role="tablist">
+    <li class="nav-item" role="presentation">
+        <button class="nav-link active fw-semibold" id="ledger-tab" data-bs-toggle="pill" data-bs-target="#ledger-pane" type="button" role="tab">
+            <i class="bi bi-journal-text me-1"></i> Expense Ledger ({{ (expenses or []) | length }})
+        </button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link fw-semibold" id="balances-tab" data-bs-toggle="pill" data-bs-target="#balances-pane" type="button" role="tab">
+            <i class="bi bi-scale me-1"></i> Live Balances & Settle Up
+        </button>
+    </li>
+    {% if group.funding_mode in ('pooled_kitty', 'common_fund', 'kitty') and fund_status %}
+    <li class="nav-item" role="presentation">
+        <button class="nav-link fw-semibold" id="kitty-tab" data-bs-toggle="pill" data-bs-target="#kitty-pane" type="button" role="tab">
+            <i class="bi bi-piggy-bank me-1"></i> Common Kitty Pool
+        </button>
+    </li>
+    {% endif %}
+    <li class="nav-item" role="presentation">
+        <button class="nav-link fw-semibold" id="members-tab" data-bs-toggle="pill" data-bs-target="#members-pane" type="button" role="tab">
+            <i class="bi bi-people me-1"></i> Members & Families ({{ (members or []) | length }})
+        </button>
+    </li>
+</ul>
+
+<!-- Tab Contents -->
+<div class="tab-content" id="groupTabContent">
+    
+    <!-- 1. EXPENSE LEDGER TAB -->
+    <div class="tab-pane fade show active" id="ledger-pane" role="tabpanel">
+        <div class="card shadow-sm border-0">
+            <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+                <h5 class="fw-bold mb-0">
+                    <i class="bi bi-receipt-cutoff me-2 text-primary"></i>All Recorded Expenses
+                </h5>
+                <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addExpenseModal">
+                    <i class="bi bi-plus-lg me-1"></i> New Expense
+                </button>
+            </div>
+            <div class="card-body p-0">
+                {% if expenses %}
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th class="ps-4">Date & Title</th>
+                                <th>Category</th>
+                                <th>Paid By</th>
+                                <th>Funding</th>
+                                <th>Split Mode</th>
+                                <th class="text-end">Amount</th>
+                                <th class="text-center pe-4">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for exp in expenses %}
+                            <tr>
+                                <td class="ps-4">
+                                    <div class="fw-bold text-dark">{{ exp.title or exp.description or 'Expense' }}</div>
+                                    <small class="text-muted">{{ exp.expense_date or 'Recent' }}</small>
+                                </td>
+                                <td>
+                                    <span class="badge bg-secondary-subtle text-secondary border">
+                                        {{ exp.category or 'General' }}
+                                    </span>
+                                </td>
+                                <td>
+                                    {% if exp.funding_source == 'kitty' %}
+                                        <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle">
+                                            <i class="bi bi-piggy-bank me-1"></i> Kitty Fund
+                                        </span>
+                                    {% else %}
+                                        {% for p in (exp.payers or []) %}
+                                            <span class="badge bg-light text-dark border me-1">
+                                                {{ p.display_name }} ({{ group.currency }} {{ (p.amount_paid or 0) | round(2) }})
+                                            </span>
+                                        {% else %}
+                                            <span class="text-muted small">{{ exp.creator_name }}</span>
+                                        {% endfor %}
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <span class="badge {{ 'bg-warning text-dark' if exp.funding_source == 'kitty' else 'bg-info text-dark' }} text-uppercase">
+                                        {{ exp.funding_source }}
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="badge bg-light text-dark border text-uppercase">
+                                        {{ exp.split_type }}
+                                    </span>
+                                </td>
+                                <td class="text-end fw-bold text-dark fs-6">
+                                    {{ group.currency }} {{ (exp.amount or 0) | round(2) }}
+                                </td>
+                                <td class="text-center pe-4">
+                                    <button class="btn btn-sm btn-outline-danger" data-expense-id="{{ exp.id }}" onclick="deleteExpense(this.dataset.expenseId)">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <div class="text-center py-5 text-muted">
+                    <i class="bi bi-inbox fs-1 d-block mb-3 text-secondary opacity-50"></i>
+                    <h5>No expenses recorded yet</h5>
+                    <p class="small mb-3">Add your first bill using AI Natural Language input, receipt OCR scanner, or manual split.</p>
+                    <button class="btn btn-primary fw-semibold" data-bs-toggle="modal" data-bs-target="#addExpenseModal">
+                        <i class="bi bi-plus-circle me-1"></i> Record an Expense
+                    </button>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- 2. LIVE BALANCES & SETTLE UP TAB -->
+    <div class="tab-pane fade" id="balances-pane" role="tabpanel">
+        <div class="row g-4">
+            <!-- Settlement Plan Cards -->
+            <div class="col-lg-6">
+                <div class="card shadow-sm border-0 mb-4">
+                    <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+                        <h5 class="fw-bold mb-0">
+                            <i class="bi bi-signpost-split me-2 text-primary"></i>Simplified Debt Settlement Plan
+                        </h5>
+                        <span class="badge bg-success-subtle text-success border border-success-subtle px-2 py-1">
+                            <i class="bi bi-lightning-charge-fill me-1"></i> 1-Click Settle
+                        </span>
+                    </div>
+                    <div class="card-body p-4">
+                        {% if balances and balances.settlement_plan %}
+                        <p class="text-muted small mb-3">
+                            The minimum transactions needed to settle all mutual debts among members:
+                        </p>
+                        <div class="list-group list-group-flush gap-2">
+                            {% for item in balances.settlement_plan %}
+                            <div class="list-group-item d-flex justify-content-between align-items-center p-3 border rounded shadow-sm">
+                                <div class="d-flex align-items-center gap-3">
+                                    <div class="rounded-circle bg-danger-subtle text-danger p-2 d-flex align-items-center justify-content-center" style="width: 40px; height: 40px;">
+                                        <i class="bi bi-arrow-up-right fw-bold"></i>
+                                    </div>
+                                    <div>
+                                        <div class="fw-bold text-dark">{{ item.instruction }}</div>
+                                        <small class="text-muted">
+                                            {{ item.from_name }} owes {{ item.to_name }}
+                                        </small>
+                                    </div>
+                                </div>
+                                <div>
+                                    <button class="btn btn-sm btn-success fw-semibold mark-paid-btn"
+                                            data-payer-id="{{ item.from_member_id }}"
+                                            data-payee-id="{{ item.to_member_id }}"
+                                            data-amount="{{ item.amount }}">
+                                        <i class="bi bi-check2-circle me-1"></i> Mark Paid
+                                    </button>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="text-center py-4 text-success">
+                            <i class="bi bi-check-circle-fill fs-1 d-block mb-2"></i>
+                            <h5 class="fw-bold">All Settled Up!</h5>
+                            <p class="text-muted small mb-0">No one currently owes any money in this group.</p>
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <!-- Recent Historical Settlements -->
+                <div class="card shadow-sm border-0">
+                    <div class="card-header bg-white py-3">
+                        <h6 class="fw-bold mb-0 text-muted">
+                            <i class="bi bi-clock-history me-2"></i>Recent Settlement Payments
+                        </h6>
+                    </div>
+                    <div class="card-body p-0">
+                        {% if settlements %}
+                        <ul class="list-group list-group-flush">
+                            {% for st in (settlements or []) %}
+                            <li class="list-group-item d-flex justify-content-between align-items-center py-3">
+                                <div>
+                                    <span class="fw-bold">{{ st.payer_name }}</span> paid <span class="fw-bold">{{ st.payee_name }}</span>
+                                    {% if st.payment_reference %}
+                                    <small class="text-muted d-block">Ref: {{ st.payment_reference }} ({{ st.payment_method }})</small>
+                                    {% endif %}
+                                </div>
+                                <span class="badge bg-success-subtle text-success border border-success-subtle fs-6">
+                                    + {{ group.currency }} {{ (st.amount or 0) | round(2) }}
+                                </span>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        {% else %}
+                        <div class="text-center py-3 text-muted small">No settlements recorded yet.</div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+
+            <!-- Net Balances & Consumption Column -->
+            <div class="col-lg-6">
+                <!-- Effective Net Balances -->
+                <div class="card shadow-sm border-0 mb-4">
+                    <div class="card-header bg-white py-3">
+                        <h5 class="fw-bold mb-0">
+                            <i class="bi bi-wallet2 me-2 text-primary"></i>Effective Member Balances
+                        </h5>
+                    </div>
+                    <div class="card-body p-0">
+                        {% if balances and balances.effective_balances %}
+                        <div class="table-responsive">
+                            <table class="table align-middle mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th class="ps-4">Member</th>
+                                        <th>Role / Status</th>
+                                        <th class="text-end pe-4">Net Balance</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for mid, bal in (balances.effective_balances or {}).items() %}
+                                    <tr>
+                                        <td class="ps-4 fw-semibold">
+                                            {{ balances.member_details.get(mid) or ('Member ' ~ mid) }}
+                                        </td>
+                                        <td>
+                                            <span class="badge bg-light text-muted border">Responsible Member</span>
+                                        </td>
+                                        <td class="text-end pe-4 fw-bold {{ 'text-danger' if '-' in (bal | string) else ('text-success' if (bal | float) != 0 else 'text-muted') }}">
+                                            {% if (bal | float) == 0 %}
+                                                {{ group.currency }} 0.00 (settled)
+                                            {% elif '-' in (bal | string) %}
+                                                - {{ group.currency }} {{ ((bal or 0) * -1) | round(2) }} (owes)
+                                            {% else %}
+                                                + {{ group.currency }} {{ (bal or 0) | round(2) }} (owed)
+                                            {% endif %}
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                        {% else %}
+                        <div class="p-3 text-muted text-center small">No balances to display.</div>
+                        {% endif %}
+                    </div>
+                    <div class="card-footer bg-light text-muted small py-2 px-3">
+                        <i class="bi bi-info-circle me-1"></i> Dependent/child expenses have been rolled automatically into their legal parent/sponsor.
+                    </div>
+                </div>
+
+                <!-- Total Consumption Breakdown -->
+                <div class="card shadow-sm border-0">
+                    <div class="card-header bg-white py-3">
+                        <h6 class="fw-bold mb-0 text-muted">
+                            <i class="bi bi-pie-chart me-2"></i>Consumption Breakdown (What Each Consumed)
+                        </h6>
+                    </div>
+                    <div class="card-body p-0">
+                        {% if balances and balances.consumption_breakdown %}
+                        <div class="table-responsive">
+                            <table class="table table-sm align-middle mb-0">
+                                <thead>
+                                    <tr class="table-light">
+                                        <th class="ps-4">Person</th>
+                                        <th class="text-end pe-4">Total Consumed</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for mid, consumed in (balances.consumption_breakdown or {}).items() %}
+                                    <tr>
+                                        <td class="ps-4">
+                                            {{ balances.member_details.get(mid) or ('Member ' ~ mid) }}
+                                        </td>
+                                        <td class="text-end pe-4 fw-bold">
+                                            {{ group.currency }} {{ (consumed or 0) | round(2) }}
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                        {% else %}
+                        <div class="p-3 text-muted text-center small">No consumption recorded yet.</div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 3. COMMON KITTY POOL TAB (if pooled_kitty) -->
+    {% if group.funding_mode in ('pooled_kitty', 'common_fund', 'kitty') and fund_status %}
+    <div class="tab-pane fade" id="kitty-pane" role="tabpanel">
+        <div class="row g-4">
+            <div class="col-lg-7">
+                <div class="card shadow-sm border-0 mb-4">
+                    <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+                        <h5 class="fw-bold mb-0">
+                            <i class="bi bi-pie-chart-fill me-2 text-primary"></i>Individual Member Equity Stakes
+                        </h5>
+                        <button class="btn btn-sm btn-warning text-dark fw-semibold" data-bs-toggle="modal" data-bs-target="#contributeFundModal">
+                            <i class="bi bi-plus-lg me-1"></i> Contribute
+                        </button>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table align-middle mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th class="ps-4">Member</th>
+                                        <th class="text-center">Deposited</th>
+                                        <th class="text-center">Consumed</th>
+                                        <th class="text-end pe-4">Remaining Equity</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for m in (fund_status.members_equity_breakdown or []) %}
+                                    <tr class="{{ 'table-danger' if m.is_deficit else '' }}">
+                                        <td class="ps-4 fw-bold">
+                                            {{ m.display_name }}
+                                            {% if m.is_deficit %}
+                                                <span class="badge bg-danger ms-1">Deficit!</span>
+                                            {% endif %}
+                                        </td>
+                                        <td class="text-center">{{ group.currency }} {{ (m.contributed or 0) | round(2) }}</td>
+                                        <td class="text-center">{{ group.currency }} {{ (m.consumed or 0) | round(2) }}</td>
+                                        <td class="text-end pe-4 fw-bold {{ 'text-danger' if m.is_deficit else 'text-success' }}">
+                                            {{ group.currency }} {{ (m.remaining_equity or 0) | round(2) }}
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-lg-5">
+                <!-- Contributions Log -->
+                <div class="card shadow-sm border-0 mb-4">
+                    <div class="card-header bg-white py-3">
+                        <h6 class="fw-bold mb-0 text-muted">
+                            <i class="bi bi-clock-history me-2"></i>Contribution Deposits History
+                        </h6>
+                    </div>
+                    <div class="card-body p-0">
+                        {% if fund_status.contributions %}
+                        <ul class="list-group list-group-flush">
+                            {% for c in (fund_status.contributions or []) %}
+                            <li class="list-group-item d-flex justify-content-between align-items-center py-3">
+                                <div>
+                                    <div class="fw-bold">{{ c.display_name }}</div>
+                                    <small class="text-muted">{{ c.payment_method }} • {{ c.notes or 'Deposit' }}</small>
+                                </div>
+                                <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle fs-6">
+                                    + {{ group.currency }} {{ (c.amount or 0) | round(2) }}
+                                </span>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        {% else %}
+                        <div class="text-center py-4 text-muted small">No deposits recorded yet.</div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- 4. MEMBERS & FAMILIES TAB -->
+    <div class="tab-pane fade" id="members-pane" role="tabpanel">
+        <div class="row g-4">
+            <div class="col-lg-7">
+                <!-- Active Members List -->
+                <div class="card shadow-sm border-0 mb-4">
+                    <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+                        <h5 class="fw-bold mb-0">
+                            <i class="bi bi-people-fill me-2 text-primary"></i>Members & Guests ({{ (members or []) | length }})
+                        </h5>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="list-group list-group-flush">
+                            {% for m in (members or []) %}
+                            <div class="list-group-item d-flex justify-content-between align-items-center py-3">
+                                <div class="d-flex align-items-start gap-3">
+                                    <div class="rounded-circle bg-primary-subtle text-primary fw-bold d-flex align-items-center justify-content-center" style="width: 42px; height: 42px; font-size: 1.1rem;">
+                                        {{ (m.display_name or 'U') | first | upper }}
+                                    </div>
+                                    <div>
+                                        <div class="fw-bold d-flex align-items-center gap-1">
+                                            {{ m.display_name }}
+                                            {% if m.role == 'admin' %}
+                                                <span class="badge bg-dark-subtle text-dark border">Admin</span>
+                                            {% endif %}
+                                            {% if m.user_id is none %}
+                                                <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle">
+                                                    <i class="bi bi-person-dash me-1"></i>Guest Placeholder
+                                                </span>
+                                            {% else %}
+                                                <span class="badge bg-success-subtle text-success border border-success-subtle">
+                                                    <i class="bi bi-person-check me-1"></i>Registered
+                                                </span>
+                                            {% endif %}
+                                        </div>
+                                        <div class="text-muted small mt-1">
+                                            {% if m.guest_email or m.user_email %}
+                                                <span><i class="bi bi-envelope me-1"></i>{{ m.guest_email or m.user_email }}</span>
+                                            {% endif %}
+                                            {% if m.guest_phone or m.user_phone %}
+                                                <span class="ms-2"><i class="bi bi-telephone me-1"></i>{{ m.guest_phone or m.user_phone }}</span>
+                                            {% endif %}
+                                            {% if m.sponsor_id %}
+                                                <span class="badge bg-info-subtle text-info-emphasis ms-2">
+                                                    <i class="bi bi-person-heart me-1"></i>Sponsored by {{ m.sponsor_name or 'Parent' }}
+                                                </span>
+                                            {% endif %}
+                                            {% if m.family_name %}
+                                                <span class="badge bg-secondary-subtle text-secondary ms-2">
+                                                    <i class="bi bi-house me-1"></i>{{ m.family_name }}
+                                                </span>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="d-flex align-items-center gap-2">
+                                    <span class="badge bg-light text-dark border text-capitalize">{{ m.status }}</span>
+                                    <button type="button" class="btn btn-sm btn-outline-primary"
+                                        data-member-id="{{ m.id }}"
+                                        data-member-name="{{ m.display_name }}"
+                                        data-member-contact="{{ m.guest_email or m.guest_phone or '' }}"
+                                        data-member-role="{{ m.role }}"
+                                        data-member-sponsor="{{ m.sponsor_id or '' }}"
+                                        data-member-family="{{ m.family_unit_id or '' }}"
+                                        onclick="openEditMemberModal(this)"
+                                        title="Edit Member / Change Type">
+                                        <i class="bi bi-pencil-square"></i>
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-danger"
+                                        data-member-id="{{ m.id }}"
+                                        data-member-name="{{ m.display_name }}"
+                                        onclick="confirmDeleteMember(this)"
+                                        title="Remove Member">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Unclaimed Placeholders List -->
+                {% if unclaimed %}
+                <div class="card shadow-sm border-0 mb-4 border-start border-warning border-4">
+                    <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+                        <h6 class="fw-bold mb-0 text-warning-emphasis">
+                            <i class="bi bi-hourglass-split me-2 text-warning"></i>Unclaimed Guest Placeholders ({{ (unclaimed or []) | length }})
+                        </h6>
+                        <span class="badge bg-warning text-dark">Awaiting Claim</span>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="list-group list-group-flush">
+                            {% for p in (unclaimed or []) %}
+                            <div class="list-group-item d-flex justify-content-between align-items-center py-2 px-3">
+                                <div>
+                                    <strong>{{ p.display_name }}</strong>
+                                    {% if p.guest_email or p.guest_phone %}
+                                        <small class="text-muted ms-2">({{ p.guest_email or p.guest_phone }})</small>
+                                    {% endif %}
+                                </div>
+                                <div class="d-flex align-items-center gap-2">
+                                    <span class="badge bg-light text-muted border">Placeholder Spot</span>
+                                    <button class="btn btn-sm btn-outline-secondary" data-invite-url="{{ url_for('groups.join_group_view', invite_code=(group.invite_code or 'code'), _external=True) if group.invite_code else '#' }}" onclick="copyInviteLink(this)">
+                                        <i class="bi bi-share me-1"></i>Share Invite
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-primary"
+                                        data-member-id="{{ p.id }}"
+                                        data-member-name="{{ p.display_name }}"
+                                        data-member-contact="{{ p.guest_email or p.guest_phone or '' }}"
+                                        data-member-role="{{ p.role }}"
+                                        data-member-sponsor="{{ p.sponsor_id or '' }}"
+                                        onclick="openEditMemberModal(this)"
+                                        title="Edit Placeholder">
+                                        <i class="bi bi-pencil-square"></i>
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-danger"
+                                        data-member-id="{{ p.id }}"
+                                        data-member-name="{{ p.display_name }}"
+                                        onclick="confirmDeleteMember(this)"
+                                        title="Remove Placeholder">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+
+            <!-- Add Member Column -->
+            <div class="col-lg-5">
+                <div class="card shadow-sm border-0 mb-4">
+                    <div class="card-header bg-white py-3">
+                        <h5 class="fw-bold mb-0">
+                            <i class="bi bi-person-plus-fill me-2 text-primary"></i>Add Member or Guest
+                        </h5>
+                    </div>
+                    <div class="card-body p-4">
+                        <form method="POST" action="{{ url_for('groups.add_member_view', group_id=group.id) }}">
+                            <div class="mb-3">
+                                <label for="memberNameInput" class="form-label fw-semibold">Display Name <span class="text-danger">*</span></label>
+                                <input type="text" class="form-control" id="memberNameInput" name="display_name" placeholder="e.g. Uncle Ramesh or Baby Aarav" required>
+                            </div>
+                            <div class="mb-3">
+                                <label for="memberContactInput" class="form-label fw-semibold">Contact Email or Phone</label>
+                                <input type="text" class="form-control" id="memberContactInput" name="contact_info" placeholder="ramesh@gmail.com or +919876543210">
+                                <div class="form-text">If they register with this email/phone later, they will auto-claim this spot!</div>
+                            </div>
+                            <div class="mb-3">
+                                <label for="memberRoleSelect" class="form-label fw-semibold">Member Type</label>
+                                <select class="form-select" id="memberRoleSelect" name="role" onchange="toggleSponsorVisibility()">
+                                    <option value="member">Adult / Independent Member</option>
+                                    <option value="CHILD">Child / Dependent (Debt rolls to Sponsor)</option>
+                                </select>
+                            </div>
+
+                            <div class="mb-3" id="sponsorGroupDiv" style="display: none;">
+                                <label for="sponsorSelect" class="form-label fw-semibold">
+                                    <i class="bi bi-person-heart text-danger me-1"></i>Assign Sponsor (Parent) <span class="text-danger">*</span>
+                                </label>
+                                <select class="form-select border-primary" id="sponsorSelect" name="sponsor_id">
+                                    <option value="">-- Choose Adult Sponsor --</option>
+                                    {% for m in (members or []) %}
+                                        {% if m.sponsor_id is none %}
+                                            <option value="{{ m.id }}">{{ m.display_name }}</option>
+                                        {% endif %}
+                                    {% endfor %}
+                                </select>
+                                <div class="form-text">All expenses consumed by this dependent will roll onto this sponsor's balance.</div>
+                            </div>
+
+                            {% if families %}
+                            <div class="mb-3">
+                                <label for="familyUnitSelect" class="form-label fw-semibold">Family Unit</label>
+                                <select class="form-select" id="familyUnitSelect" name="family_unit_id">
+                                    <option value="">-- None / Individual --</option>
+                                    {% for f in (families or []) %}
+                                        <option value="{{ f.id }}">{{ f.name or f.unit_name }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            {% endif %}
+
+                            <button type="submit" class="btn btn-primary w-100 fw-semibold mt-2">
+                                <i class="bi bi-person-check me-1"></i> Add to Group
+                            </button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Family Unit Creation (Available for any Group) -->
+                <div class="card shadow-sm border-0 mb-4">
+                    <div class="card-header bg-white py-3">
+                        <h6 class="fw-bold mb-0">
+                            <i class="bi bi-house-door-fill me-2 text-primary"></i>Create Family Unit
+                        </h6>
+                    </div>
+                    <div class="card-body p-4">
+                        <form method="POST" action="{{ url_for('groups.create_family_view', group_id=group.id) }}">
+                            <div class="input-group">
+                                <input type="text" class="form-control" name="name" placeholder="e.g. The Sharmas" required>
+                                <button type="submit" class="btn btn-outline-primary fw-semibold">Create</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Danger Zone / Group Settings (Creator Only) -->
+                {% if group.created_by == session.get('user_id') %}
+                <div class="card shadow-sm border-danger border-1 mb-4">
+                    <div class="card-header bg-danger-subtle text-danger-emphasis py-3">
+                        <h6 class="fw-bold mb-0">
+                            <i class="bi bi-exclamation-triangle-fill me-2"></i>Danger Zone • Group Settings
+                        </h6>
+                    </div>
+                    <div class="card-body p-4">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-3">
+                            <div>
+                                <div class="fw-bold text-danger">Delete This Group</div>
+                                <div class="text-muted small">Permanently removes the group and its ledger once all member balances are settled to zero.</div>
+                            </div>
+                            <form method="POST" action="{{ url_for('groups.delete_group_view', group_id=group.id) }}" onsubmit="return confirm('Are you sure you want to delete this group? This action cannot be undone.');">
+                                <button type="submit" class="btn btn-danger fw-semibold">
+                                    <i class="bi bi-trash3 me-1"></i> Delete Group
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ======================================================================= -->
+<!-- MODAL 1: ADD EXPENSE MODAL (WITH AI NL & SMART RECEIPT OCR)              -->
+<!-- ======================================================================= -->
+<div class="modal fade" id="addExpenseModal" tabindex="-1" aria-labelledby="addExpenseModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content border-0 shadow">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title fw-bold" id="addExpenseModalLabel">
+                    <i class="bi bi-receipt me-2"></i>Record New Expense
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            
+            <div class="modal-body p-4">
+                <!-- Sub Tabs for AI vs Receipt vs Manual -->
+                <ul class="nav nav-tabs nav-fill mb-3" id="expenseMethodTabs" role="tablist">
+                    <li class="nav-item">
+                        <button class="nav-link active fw-semibold" id="ai-tab" data-bs-toggle="tab" data-bs-target="#ai-panel" type="button">
+                            <i class="bi bi-magic me-1 text-primary"></i> AI Natural Language
+                        </button>
+                    </li>
+                    <li class="nav-item">
+                        <button class="nav-link fw-semibold" id="ocr-tab" data-bs-toggle="tab" data-bs-target="#ocr-panel" type="button">
+                            <i class="bi bi-camera me-1 text-primary"></i> Smart Receipt OCR
+                        </button>
+                    </li>
+                    <li class="nav-item">
+                        <button class="nav-link fw-semibold" id="manual-tab" data-bs-toggle="tab" data-bs-target="#manual-panel" type="button">
+                            <i class="bi bi-sliders me-1 text-primary"></i> Manual Entry
+                        </button>
+                    </li>
+                </ul>
+
+                <div class="tab-content" id="expenseMethodContent">
+                    
+                    <!-- TAB A: AI NATURAL LANGUAGE INPUT -->
+                    <div class="tab-pane fade show active p-2" id="ai-panel">
+                        <div class="alert alert-info border-0 shadow-sm d-flex align-items-center gap-2 mb-3">
+                            <i class="bi bi-stars fs-4"></i>
+                            <div class="small">
+                                Type what happened in plain English! Gemini AI will parse the description, amount, payer, and split participants.
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <textarea id="aiExpensePrompt" class="form-control" rows="3" placeholder="e.g. Rahul paid ₹1,200 for beach shack dinner for everyone"></textarea>
+                        </div>
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <span class="text-muted small">Example: "Pooja paid 450 for coffee split between Pooja and Aman"</span>
+                            <button type="button" id="btnExtractAI" class="btn btn-primary fw-semibold" onclick="triggerAITextParse()">
+                                <i class="bi bi-lightning-charge-fill me-1"></i> Extract with Gemini
+                            </button>
+                        </div>
+                        <div id="aiParseSpinner" class="text-center py-2" style="display: none;">
+                            <div class="spinner-border text-primary spinner-border-sm me-2" role="status"></div>
+                            <span class="small text-muted">Parsing natural language with Gemini...</span>
+                        </div>
+                    </div>
+
+                    <!-- TAB B: SMART RECEIPT OCR SCANNER -->
+                    <div class="tab-pane fade p-2" id="ocr-panel">
+                        <div class="alert alert-primary border-0 shadow-sm d-flex align-items-center gap-2 mb-3">
+                            <i class="bi bi-camera-fill fs-4"></i>
+                            <div class="small">
+                                Upload a bill or receipt photo. Gemini Vision extracts every dish and lets you tap member chips to divide who ate what!
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label fw-semibold">Upload Receipt Image or PDF Bill</label>
+                            <input type="file" id="receiptFileInput" class="form-control" accept="image/*,.pdf,application/pdf">
+                        </div>
+                        <div id="receiptScanSuccessAlert" class="alert alert-success border-0 shadow-sm py-2 px-3 mb-3 small align-items-center gap-2" style="display: none;">
+                            <i class="bi bi-check-circle-fill fs-5 text-success"></i>
+                            <div id="receiptScanSuccessMsg"></div>
+                        </div>
+                        <div class="d-flex justify-content-end gap-2 mb-3">
+                            <button type="button" class="btn btn-outline-secondary fw-semibold" onclick="openManualItemizedBuilder()">
+                                <i class="bi bi-pencil-square me-1"></i> Add Dishes Manually
+                            </button>
+                            <button type="button" id="btnScanReceipt" class="btn btn-primary fw-semibold" onclick="triggerReceiptScan()">
+                                <i class="bi bi-cloud-arrow-up-fill me-1"></i> Scan with Gemini Vision
+                            </button>
+                        </div>
+                        <div id="receiptScanSpinner" class="text-center py-2" style="display: none;">
+                            <div class="spinner-border text-primary spinner-border-sm me-2" role="status"></div>
+                            <span class="small text-muted">Scanning bill line items with Gemini Vision...</span>
+                        </div>
+                    </div>
+
+                    <!-- TAB C: MANUAL ENTRY -->
+                    <div class="tab-pane fade p-2" id="manual-panel">
+                        <div class="alert alert-light border small text-muted mb-0">
+                            <i class="bi bi-pencil-square me-1 text-primary"></i>Enter your expense details directly in the fields below.
+                        </div>
+                    </div>
+                </div>
+
+                <hr class="my-4">
+
+                <!-- Main Expense Submission Form -->
+                <form id="createExpenseForm" onsubmit="submitExpenseForm(event)">
+                    <div id="aiExtractionBanner" style="display: none;"></div>
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">Expense Title / Description <span class="text-danger">*</span></label>
+                            <input type="text" id="expenseDesc" class="form-control" placeholder="e.g. Dinner, Cab, Airbnb" required>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label fw-semibold">Total Amount ({{ group.currency }}) <span class="text-danger">*</span></label>
+                            <input type="number" step="0.01" id="expenseAmount" class="form-control fw-bold" placeholder="0.00" required>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label fw-semibold">Category</label>
+                            <select id="expenseCategory" class="form-select">
+                                <option value="Food">🍽️ Food & Dining</option>
+                                <option value="Travel">🚗 Travel & Cab</option>
+                                <option value="Stay">🏨 Stay & Hotel</option>
+                                <option value="Groceries">🛒 Groceries</option>
+                                <option value="Entertainment">🎟️ Entertainment</option>
+                                <option value="General" selected>📦 General</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="row g-3 mb-3">
+                        <!-- Paid From / Payer -->
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">Who Paid? <span class="text-danger">*</span></label>
+                            <div class="d-flex gap-2">
+                                <select id="expensePayer" class="form-select border-primary fw-semibold" required>
+                                    {% if group.funding_mode in ('pooled_kitty', 'common_fund', 'kitty') %}
+                                    <option value="POOL" class="fw-bold text-primary">💰 Common Kitty Pool</option>
+                                    {% endif %}
+                                    {% for m in (members or []) %}
+                                        {% if m.user_id == session.get('user_id') %}
+                                        <option value="{{ m.id }}" selected>{{ m.display_name }}</option>
+                                        {% else %}
+                                        <option value="{{ m.id }}">{{ m.display_name }}</option>
+                                        {% endif %}
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="form-text">Choose a member who paid out-of-pocket or the common trip kitty.</div>
+                        </div>
+
+                        <!-- Split Mode -->
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">Split Type</label>
+                            <select id="expenseSplitType" class="form-select" onchange="toggleSplitTypeFields()">
+                                <option value="EQUAL" selected>Equal Split (Default)</option>
+                                <option value="EXACT">Exact Amounts per Member</option>
+                                <option value="PERCENTAGE">Percentage Split (%)</option>
+                                <option value="SHARES">Ratio / Shares Split</option>
+                                <option value="ITEMIZED">Itemized Bill / Receipt</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Participant Selection Checklist -->
+                    <div id="splitParticipantsSection" class="mb-4">
+                        <label class="form-label fw-semibold d-flex justify-content-between">
+                            <span>Participants Sharing this Expense:</span>
+                            <span class="small text-primary cursor-pointer" onclick="toggleSelectAllParticipants()">Toggle All</span>
+                        </label>
+                        <div class="row g-2 p-3 bg-light rounded border" id="participantsCheckboxesList">
+                            {% for m in (members or []) %}
+                            <div class="col-md-6">
+                                <div class="form-check d-flex align-items-center justify-content-between p-2 rounded bg-white border">
+                                    <div>
+                                        <input class="form-check-input participant-chk" type="checkbox" value="{{ m.id }}" id="chkMember{{ m.id }}" checked>
+                                        <label class="form-check-label fw-semibold ms-2" for="chkMember{{ m.id }}">
+                                            {{ m.display_name }}
+                                        </label>
+                                    </div>
+                                    <input type="number" step="0.01" class="form-control form-control-sm participant-custom-val" style="width: 90px; display: none;" placeholder="0" data-member-id="{{ m.id }}">
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <div id="splitBalanceHelper" class="small mt-2 p-2 rounded" style="display: none;"></div>
+                    </div>
+
+                    <!-- Interactive Line-Itemized Dish Assignment Section -->
+                    <div id="dishAssignmentContainer" class="card shadow-sm border-0 mb-4 bg-light" style="display: none;">
+                        <div class="card-header bg-white py-3 d-flex flex-wrap justify-content-between align-items-center gap-2">
+                            <div>
+                                <h6 class="fw-bold mb-0 text-dark">
+                                    <i class="bi bi-receipt-cutoff me-1 text-primary"></i> Line-Itemized Bill & Dish Assignment
+                                </h6>
+                                <small class="text-muted">Divide bill items by who ate or shared what with proportional tax & tip.</small>
+                            </div>
+                            <button type="button" class="btn btn-sm btn-outline-primary fw-semibold" onclick="toggleManualAddDishForm()">
+                                <i class="bi bi-plus-circle me-1"></i> Add Dish / Item
+                            </button>
+                        </div>
+                        <div class="card-body p-3">
+                            <!-- Inline Quick Add Dish Form -->
+                            <div id="manualDishAddForm" class="p-3 bg-white border rounded shadow-sm mb-3" style="display: none;">
+                                <h6 class="fw-bold small text-primary mb-2">
+                                    <i class="bi bi-plus-square me-1"></i> Add Item to Bill
+                                </h6>
+                                <div class="row g-2 align-items-end">
+                                    <div class="col-md-5">
+                                        <label class="form-label small fw-semibold">Item / Dish Name</label>
+                                        <input type="text" id="manualDishName" class="form-control form-control-sm" placeholder="e.g. Garlic Naan, Paneer Tikka, Cab">
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label small fw-semibold">Price ({{ group.currency }})</label>
+                                        <input type="number" step="0.01" id="manualDishPrice" class="form-control form-control-sm" placeholder="0.00">
+                                    </div>
+                                    <div class="col-md-2">
+                                        <label class="form-label small fw-semibold">Quantity</label>
+                                        <input type="number" step="1" min="1" id="manualDishQty" class="form-control form-control-sm" value="1">
+                                    </div>
+                                    <div class="col-md-2 d-flex gap-1">
+                                        <button type="button" class="btn btn-primary btn-sm w-100 fw-semibold" onclick="addManualDishItem()">
+                                            <i class="bi bi-plus-lg"></i> Add
+                                        </button>
+                                        <button type="button" class="btn btn-outline-secondary btn-sm" onclick="toggleManualAddDishForm()" title="Cancel">
+                                            <i class="bi bi-x"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- List of itemized dishes -->
+                            <div id="receiptItemsList" class="d-flex flex-column gap-3 mb-3"></div>
+
+                            <!-- Bill Adjustments: Tax, Tip, Discount -->
+                            <div class="row g-2 mb-3 bg-white p-3 rounded border">
+                                <div class="col-4">
+                                    <label class="form-label small fw-semibold">Tax ({{ group.currency }})</label>
+                                    <input type="number" step="0.01" class="form-control form-control-sm" id="itemizedTax" value="0.00" oninput="recalculateItemizedShares()">
+                                </div>
+                                <div class="col-4">
+                                    <label class="form-label small fw-semibold">Tip ({{ group.currency }})</label>
+                                    <input type="number" step="0.01" class="form-control form-control-sm" id="itemizedTip" value="0.00" oninput="recalculateItemizedShares()">
+                                </div>
+                                <div class="col-4">
+                                    <label class="form-label small fw-semibold">Discount ({{ group.currency }})</label>
+                                    <input type="number" step="0.01" class="form-control form-control-sm" id="itemizedDiscount" value="0.00" oninput="recalculateItemizedShares()">
+                                </div>
+                            </div>
+
+                            <!-- Live Computed Shares Preview -->
+                            <div class="p-3 bg-white rounded border">
+                                <h6 class="fw-bold small text-muted mb-2">Live Member Shares Preview (with proportional tax/tip):</h6>
+                                <div id="liveItemizedShares" class="d-flex flex-wrap gap-2"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="d-flex justify-content-end gap-2">
+                        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" id="btnSubmitExpense" class="btn btn-primary fw-semibold px-4">
+                            <i class="bi bi-check2-circle me-1"></i> Save Expense
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ======================================================================= -->
+<!-- MODAL 3: CONTRIBUTE TO COMMON KITTY FUND                                -->
+<!-- ======================================================================= -->
+{% if group.funding_mode in ('pooled_kitty', 'common_fund', 'kitty') %}
+<div class="modal fade" id="contributeFundModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content border-0 shadow">
+            <div class="modal-header bg-warning text-dark">
+                <h5 class="modal-title fw-bold">
+                    <i class="bi bi-piggy-bank-fill me-2"></i>Contribute to Common Trip Kitty
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form onsubmit="submitFundContribution(event)">
+                <div class="modal-body p-4">
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Contributing Member <span class="text-danger">*</span></label>
+                        <select id="fundMember" class="form-select" required>
+                            {% for m in (members or []) %}
+                            <option value="{{ m.id }}">{{ m.display_name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Contribution Amount ({{ group.currency }}) <span class="text-danger">*</span></label>
+                        <input type="number" step="0.01" id="fundAmount" class="form-control fw-bold" placeholder="500.00" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Payment Method</label>
+                        <select id="fundMethod" class="form-select">
+                            <option value="UPI" selected>UPI / Online Transfer</option>
+                            <option value="Cash">Cash Deposit</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Notes</label>
+                        <input type="text" id="fundNotes" class="form-control" placeholder="e.g. Initial kitty contribution">
+                    </div>
+                </div>
+                <div class="modal-footer bg-light">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-warning text-dark fw-semibold px-4">
+                        <i class="bi bi-wallet-fill me-1"></i> Deposit to Kitty
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- ======================================================================= -->
+<!-- MODAL 4: EDIT MEMBER / CHANGE MEMBER TYPE                               -->
+<!-- ======================================================================= -->
+<div class="modal fade" id="editMemberModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content border-0 shadow">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title fw-bold">
+                    <i class="bi bi-pencil-square me-2"></i>Edit Member / Change Type
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form onsubmit="submitEditMember(event)">
+                <input type="hidden" id="editMemberId">
+                <div class="modal-body p-4">
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Display Name <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="editMemberName" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Contact Email or Phone</label>
+                        <input type="text" class="form-control" id="editMemberContact" placeholder="email@example.com or +919876543210">
+                        <div class="form-text">Used for invite linking and contact display.</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Member Type</label>
+                        <select class="form-select" id="editMemberType" onchange="toggleEditSponsorVisibility()">
+                            <option value="ADULT">Adult / Independent Member</option>
+                            <option value="CHILD">Child / Dependent (Debt rolls to Sponsor)</option>
+                        </select>
+                    </div>
+                    <div class="mb-3" id="editSponsorDiv" style="display: none;">
+                        <label class="form-label fw-semibold">
+                            <i class="bi bi-person-heart text-danger me-1"></i>Assign Sponsor (Parent) <span class="text-danger">*</span>
+                        </label>
+                        <select class="form-select border-primary" id="editMemberSponsor">
+                            <option value="">-- Choose Adult Sponsor --</option>
+                            {% for m in (members or []) %}
+                                <option value="{{ m.id }}">{{ m.display_name }}</option>
+                            {% endfor %}
+                        </select>
+                        <div class="form-text">All expenses consumed by this dependent will roll onto this sponsor's balance.</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Group Role</label>
+                        <select class="form-select" id="editMemberRole">
+                            <option value="member">Regular Member</option>
+                            <option value="admin">Group Admin</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="modal-footer bg-light">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" id="btnSaveEditMember" class="btn btn-primary fw-semibold px-4">
+                        <i class="bi bi-check2-circle me-1"></i> Save Changes
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script id="groupDataPayload" type="application/json">
+{
+    "groupId": {{ (group.id or 0) | tojson }},
+    "currency": {{ (group.currency or 'INR') | tojson }},
+    "members": [
+        {% for m in (members or []) %}
+        {"id": {{ m.id | tojson }}, "name": {{ (m.display_name or 'Member') | tojson }}}{{ "," if not loop.last else "" }}
+        {% endfor %}
+    ]
+}
+</script>
+<script>
+const _groupPayloadElem = document.getElementById('groupDataPayload');
+const _groupData = _groupPayloadElem ? JSON.parse(_groupPayloadElem.textContent || '{}') : {};
+const GROUP_ID = _groupData.groupId || 0;
+const GROUP_CURRENCY = _groupData.currency || 'INR';
+const GROUP_MEMBERS = _groupData.members || [];
+
+// In-memory holder for scanned receipt line items
+let parsedReceiptItems = [];
+
+function copyInviteLink(btn) {
+    if (!btn) return;
+    const linkUrl = btn.getAttribute('data-invite-url');
+    if (!linkUrl || linkUrl === '#' || linkUrl.endsWith('/join/code')) {
+        alert('No invite code generated for this group yet.');
+        return;
+    }
+
+    if (!navigator.clipboard) {
+        prompt('Copy invite link:', linkUrl);
+        return;
+    }
+    navigator.clipboard.writeText(linkUrl).then(() => {
+        const originalHtml = btn.innerHTML;
+        btn.innerHTML = '<i class="bi bi-check2 text-success"></i> Copied!';
+        btn.classList.add('border-success');
+        setTimeout(() => {
+            btn.innerHTML = originalHtml;
+            btn.classList.remove('border-success');
+        }, 2000);
+    }).catch(() => {
+        prompt('Copy invite link:', linkUrl);
+    });
+}
+
+function toggleSponsorVisibility() {
+    const roleSelect = document.getElementById('memberRoleSelect');
+    const sponsorGroupDiv = document.getElementById('sponsorGroupDiv');
+    const sponsorSelect = document.getElementById('sponsorSelect');
+    if (!roleSelect || !sponsorGroupDiv || !sponsorSelect) return;
+    
+    if (roleSelect.value === 'CHILD') {
+        sponsorGroupDiv.style.display = 'block';
+        sponsorSelect.setAttribute('required', 'required');
+    } else {
+        sponsorGroupDiv.style.display = 'none';
+        sponsorSelect.removeAttribute('required');
+        sponsorSelect.value = '';
+    }
+}
+
+// -------------------------------------------------------------
+// AI FEATURE 1: Natural Language Expense Text Parsing
+// -------------------------------------------------------------
+async function triggerAITextParse() {
+    const promptInput = document.getElementById('aiExpensePrompt');
+    const spinner = document.getElementById('aiParseSpinner');
+    const btn = document.getElementById('btnExtractAI');
+    if (!promptInput) return;
+    const text = promptInput.value.trim();
+    if (!text) {
+        alert('Please enter an expense description first.');
+        return;
+    }
+
+    if (spinner) spinner.style.display = 'block';
+    if (btn) btn.disabled = true;
+
+    try {
+        const res = await fetch(`/api/groups/${GROUP_ID}/ai/parse-nl`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: text })
+        });
+        const data = await res.json();
+        if (data.success && data.parsed) {
+            const p = data.parsed;
+            document.getElementById('expenseDesc').value = p.description || text;
+            if (p.amount) document.getElementById('expenseAmount').value = p.amount;
+
+            if (p.payer_id) {
+                document.getElementById('expensePayer').value = p.payer_id;
+            }
+
+            if (p.split_member_ids && p.split_member_ids.length > 0) {
+                document.querySelectorAll('.participant-chk').forEach(chk => {
+                    chk.checked = p.split_member_ids.includes(parseInt(chk.value));
+                });
+            }
+            updateSplitHelper();
+
+            const banner = document.getElementById('aiExtractionBanner');
+            if (banner) {
+                banner.className = 'alert alert-success alert-dismissible fade show d-flex align-items-center gap-2 mb-3';
+                banner.innerHTML = `
+                    <i class="bi bi-stars fs-4 text-success"></i>
+                    <div>
+                        <strong>Gemini AI Parsed Successfully!</strong> Description: "${p.description || text}" • Amount: ${GROUP_CURRENCY} ${p.amount}.
+                        <div class="small text-muted">Review the details below and click "Save Expense" to confirm.</div>
+                    </div>
+                    <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert"></button>
+                `;
+                banner.style.display = 'flex';
+            }
+
+            const manualTab = document.getElementById('manual-tab');
+            if (manualTab) {
+                bootstrap.Tab.getOrCreateInstance(manualTab).show();
+            }
+            document.getElementById('expenseDesc')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } else {
+            alert(data.error || 'Failed to parse text.');
+        }
+    } catch (e) {
+        alert('Error communicating with AI service: ' + e.message);
+    } finally {
+        if (spinner) spinner.style.display = 'none';
+        if (btn) btn.disabled = false;
+    }
+}
+
+// -------------------------------------------------------------
+// AI FEATURE 2: Smart Receipt Vision OCR & Dish Assignment Chips
+// -------------------------------------------------------------
+async function triggerReceiptScan() {
+    const fileInput = document.getElementById('receiptFileInput');
+    const spinner = document.getElementById('receiptScanSpinner');
+    const btn = document.getElementById('btnScanReceipt');
+
+    if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+        alert('Please choose a receipt image file.');
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('receipt_file', fileInput.files[0]);
+
+    if (spinner) spinner.style.display = 'block';
+    if (btn) btn.disabled = true;
+
+    try {
+        const res = await fetch(`/api/groups/${GROUP_ID}/ai/parse-receipt`, {
+            method: 'POST',
+            body: formData
+        });
+        const data = await res.json();
+        if (data.success && data.receipt) {
+            const r = data.receipt;
+            document.getElementById('expenseDesc').value = r.merchant_name || 'Restaurant Bill';
+            document.getElementById('expenseAmount').value = r.total;
+            document.getElementById('expenseCategory').value = 'Food';
+            document.getElementById('expenseSplitType').value = 'ITEMIZED';
+            toggleSplitTypeFields();
+
+            document.getElementById('itemizedTax').value = r.tax || 0.00;
+            document.getElementById('itemizedTip').value = r.tip || 0.00;
+            document.getElementById('itemizedDiscount').value = r.discount || 0.00;
+
+            parsedReceiptItems = (r.items || []).map(item => {
+                const qty = parseFloat(item.quantity || 1);
+                const unitPrice = parseFloat(item.unit_price || 0);
+                const totPrice = parseFloat(item.total_price || (unitPrice * qty) || 0);
+                return {
+                    name: item.name || 'Dish Item',
+                    price: totPrice,
+                    unit_price: unitPrice || totPrice,
+                    quantity: qty,
+                    assigned_members: GROUP_MEMBERS.map(m => m.id)
+                };
+            });
+
+            renderDishAssignmentUI();
+            const dishContainer = document.getElementById('dishAssignmentContainer');
+            if (dishContainer) {
+                dishContainer.style.display = 'block';
+                setTimeout(() => {
+                    dishContainer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                }, 100);
+            }
+            const successAlert = document.getElementById('receiptScanSuccessAlert');
+            const successMsg = document.getElementById('receiptScanSuccessMsg');
+            if (successAlert && successMsg) {
+                successMsg.innerHTML = `<strong>Receipt scanned!</strong> Extracted <strong>${parsedReceiptItems.length} items</strong> (${GROUP_CURRENCY} ${r.total}). Review dishes below.`;
+                successAlert.style.display = 'flex';
+            }
+        } else {
+            alert(data.error || 'Failed to scan receipt.');
+        }
+    } catch (e) {
+        alert('Error scanning receipt: ' + e.message);
+    } finally {
+        if (spinner) spinner.style.display = 'none';
+        if (btn) btn.disabled = false;
+    }
+}
+
+function toggleManualAddDishForm() {
+    const formDiv = document.getElementById('manualDishAddForm');
+    if (!formDiv) return;
+    const isHidden = (formDiv.style.display === 'none' || formDiv.style.display === '');
+    formDiv.style.display = isHidden ? 'block' : 'none';
+    if (isHidden) {
+        document.getElementById('manualDishName')?.focus();
+    }
+}
+
+function openManualItemizedBuilder() {
+    document.getElementById('expenseSplitType').value = 'ITEMIZED';
+    toggleSplitTypeFields();
+    const dishContainer = document.getElementById('dishAssignmentContainer');
+    if (dishContainer) {
+        dishContainer.style.display = 'block';
+        dishContainer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+    const formDiv = document.getElementById('manualDishAddForm');
+    if (formDiv) formDiv.style.display = 'block';
+    document.getElementById('manualDishName')?.focus();
+}
+
+function addManualDishItem() {
+    const nameInput = document.getElementById('manualDishName');
+    const priceInput = document.getElementById('manualDishPrice');
+    const qtyInput = document.getElementById('manualDishQty');
+
+    const name = (nameInput?.value || '').trim();
+    const price = parseFloat(priceInput?.value);
+    const qty = parseFloat(qtyInput?.value) || 1;
+
+    if (!name) {
+        alert('Please enter an item or dish name (e.g. Pizza, Pasta, Cold Drinks).');
+        return;
+    }
+    if (isNaN(price) || price <= 0) {
+        alert('Please enter a valid price greater than 0.');
+        return;
+    }
+
+    const totPrice = price * qty;
+    parsedReceiptItems.push({
+        name: name,
+        price: totPrice,
+        unit_price: price,
+        quantity: qty,
+        assigned_members: GROUP_MEMBERS.map(m => m.id)
+    });
+
+    nameInput.value = '';
+    priceInput.value = '';
+    qtyInput.value = '1';
+
+    renderDishAssignmentUI();
+    const dishContainer = document.getElementById('dishAssignmentContainer');
+    if (dishContainer) dishContainer.style.display = 'block';
+}
+
+function removeDishItem(idx) {
+    if (idx >= 0 && idx < parsedReceiptItems.length) {
+        parsedReceiptItems.splice(idx, 1);
+        renderDishAssignmentUI();
+    }
+}
+
+function toggleAllMembersOnDish(dishIdx) {
+    const item = parsedReceiptItems[dishIdx];
+    if (!item) return;
+
+    if (item.assigned_members.length === GROUP_MEMBERS.length) {
+        item.assigned_members = [];
+    } else {
+        item.assigned_members = GROUP_MEMBERS.map(m => m.id);
+    }
+    renderDishAssignmentUI();
+}
+
+function renderDishAssignmentUI() {
+    const list = document.getElementById('receiptItemsList');
+    if (!list) return;
+    list.innerHTML = '';
+
+    if (parsedReceiptItems.length === 0) {
+        list.innerHTML = `
+            <div class="text-center py-4 px-3 bg-white border border-dashed rounded text-muted">
+                <i class="bi bi-receipt-cutoff fs-2 text-primary d-block mb-2"></i>
+                <div class="fw-semibold text-dark">No dishes added yet</div>
+                <div class="small mb-3">Add items manually or scan a receipt photo above.</div>
+                <button type="button" class="btn btn-sm btn-primary fw-semibold" onclick="toggleManualAddDishForm()">
+                    <i class="bi bi-plus-lg me-1"></i> Add First Dish / Item
+                </button>
+            </div>
+        `;
+        recalculateItemizedShares();
+        return;
+    }
+
+    parsedReceiptItems.forEach((item, idx) => {
+        const itemTotal = parseFloat(item.price || 0).toFixed(2);
+        const row = document.createElement('div');
+        row.className = 'p-3 bg-white border rounded shadow-sm';
+        
+        let chipsHtml = '';
+        GROUP_MEMBERS.forEach(m => {
+            const isAssigned = item.assigned_members.includes(m.id);
+            chipsHtml += `
+                <button type="button" 
+                    class="badge rounded-pill me-1 mb-1 btn-member-chip ${isAssigned ? 'bg-primary text-white border-0' : 'bg-light text-dark border'}" 
+                    style="cursor: pointer; font-size: 0.85rem; padding: 6px 12px;"
+                    onclick="toggleMemberOnDish(${idx}, ${m.id})">
+                    ${isAssigned ? '<i class="bi bi-check-lg me-1"></i>' : ''}${m.name}
+                </button>
+            `;
+        });
+
+        row.innerHTML = `
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <span class="fw-bold fs-6 text-dark">
+                    ${item.name} (${item.quantity > 1 ? item.quantity + 'x' : '1x'})
+                    ${item.assigned_members.length === 0 ? '<span class="badge bg-danger ms-2">Unassigned!</span>' : ''}
+                </span>
+                <div class="d-flex align-items-center gap-2">
+                    <span class="badge bg-success-subtle text-success fs-6 border border-success-subtle">${GROUP_CURRENCY} ${itemTotal}</span>
+                    <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" onclick="removeDishItem(${idx})" title="Remove dish">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+                <div class="d-flex flex-wrap align-items-center">
+                    <span class="small text-muted me-2">Who ate/drank this?</span>
+                    ${chipsHtml}
+                </div>
+                <button type="button" class="btn btn-link text-decoration-none p-0 small text-primary" onclick="toggleAllMembersOnDish(${idx})">
+                    Toggle All
+                </button>
+            </div>
+        `;
+        list.appendChild(row);
+    });
+
+    recalculateItemizedShares();
+}
+
+function toggleMemberOnDish(dishIdx, memberId) {
+    const item = parsedReceiptItems[dishIdx];
+    if (!item) return;
+
+    const existsIdx = item.assigned_members.indexOf(memberId);
+    if (existsIdx > -1) {
+        item.assigned_members.splice(existsIdx, 1);
+    } else {
+        item.assigned_members.push(memberId);
+    }
+
+    renderDishAssignmentUI();
+}
+
+function recalculateItemizedShares() {
+    const tax = parseFloat(document.getElementById('itemizedTax')?.value) || 0;
+    const tip = parseFloat(document.getElementById('itemizedTip')?.value) || 0;
+    const discount = parseFloat(document.getElementById('itemizedDiscount')?.value) || 0;
+
+    let memberDishSubtotals = {};
+    let totalItemsSubtotal = 0;
+
+    GROUP_MEMBERS.forEach(m => { memberDishSubtotals[m.id] = 0; });
+
+    parsedReceiptItems.forEach(item => {
+        const itemTotal = parseFloat(item.price || 0);
+        totalItemsSubtotal += itemTotal;
+        const count = item.assigned_members.length;
+        if (count > 0) {
+            const share = itemTotal / count;
+            item.assigned_members.forEach(mid => {
+                memberDishSubtotals[mid] = (memberDishSubtotals[mid] || 0) + share;
+            });
+        }
+    });
+
+    const netAdjustment = tax + tip - discount;
+    const previewContainer = document.getElementById('liveItemizedShares');
+    if (previewContainer) {
+        previewContainer.innerHTML = '';
+        GROUP_MEMBERS.forEach(m => {
+            const sub = memberDishSubtotals[m.id] || 0;
+            let finalShare = sub;
+            if (totalItemsSubtotal > 0) {
+                finalShare += (sub / totalItemsSubtotal) * netAdjustment;
+            }
+            if (finalShare < 0) finalShare = 0;
+
+            previewContainer.innerHTML += `
+                <div class="badge bg-white text-dark border p-2 shadow-sm">
+                    <strong>${m.name}:</strong> ${GROUP_CURRENCY} ${finalShare.toFixed(2)}
+                </div>
+            `;
+        });
+    }
+
+    const finalBillTotal = Math.max(0, totalItemsSubtotal + tax + tip - discount);
+    if (document.getElementById('expenseSplitType')?.value === 'ITEMIZED') {
+        const expAmt = document.getElementById('expenseAmount');
+        if (expAmt) expAmt.value = finalBillTotal.toFixed(2);
+    }
+}
+
+function toggleSplitTypeFields() {
+    const type = document.getElementById('expenseSplitType').value;
+    const customInputs = document.querySelectorAll('.participant-custom-val');
+    const participantsSection = document.getElementById('splitParticipantsSection');
+    const dishContainer = document.getElementById('dishAssignmentContainer');
+    const expAmt = document.getElementById('expenseAmount');
+    
+    if (type === 'ITEMIZED') {
+        if (participantsSection) participantsSection.style.display = 'none';
+        if (dishContainer) {
+            dishContainer.style.display = 'block';
+            renderDishAssignmentUI();
+        }
+        if (expAmt) expAmt.setAttribute('readonly', 'readonly');
+    } else {
+        if (participantsSection) participantsSection.style.display = 'block';
+        if (dishContainer) dishContainer.style.display = 'none';
+        if (expAmt) expAmt.removeAttribute('readonly');
+        
+        if (type === 'EXACT' || type === 'PERCENTAGE' || type === 'SHARES') {
+            customInputs.forEach(i => {
+                i.style.display = 'block';
+                i.placeholder = type === 'PERCENTAGE' ? '%' : (type === 'SHARES' ? 'shares' : '₹');
+            });
+            updateSplitHelper();
+        } else {
+            customInputs.forEach(i => { i.style.display = 'none'; });
+            const helper = document.getElementById('splitBalanceHelper');
+            if (helper) helper.style.display = 'none';
+        }
+    }
+}
+
+function updateSplitHelper() {
+    const type = document.getElementById('expenseSplitType')?.value;
+    const helper = document.getElementById('splitBalanceHelper');
+    const totalAmount = parseFloat(document.getElementById('expenseAmount')?.value) || 0;
+    if (!helper) return;
+
+    if (type !== 'EXACT' && type !== 'PERCENTAGE') {
+        helper.style.display = 'none';
+        return;
+    }
+
+    let sum = 0;
+    document.querySelectorAll('.participant-chk:checked').forEach(chk => {
+        const mid = chk.value;
+        const input = document.querySelector(`.participant-custom-val[data-member-id="${mid}"]`);
+        if (input && input.value) {
+            sum += parseFloat(input.value) || 0;
+        }
+    });
+
+    helper.style.display = 'block';
+    if (type === 'EXACT') {
+        const diff = Math.abs(sum - totalAmount);
+        if (diff < 0.01 && totalAmount > 0) {
+            helper.className = 'small mt-2 p-2 rounded bg-success-subtle text-success fw-semibold border border-success-subtle';
+            helper.innerHTML = `<i class="bi bi-check-circle-fill me-1"></i> Exact shares balanced! (Total: ${GROUP_CURRENCY} ${sum.toFixed(2)})`;
+        } else {
+            helper.className = 'small mt-2 p-2 rounded bg-danger-subtle text-danger fw-semibold border border-danger-subtle';
+            helper.innerHTML = `<i class="bi bi-exclamation-triangle-fill me-1"></i> Sum of shares: ${GROUP_CURRENCY} ${sum.toFixed(2)} / Required: ${GROUP_CURRENCY} ${totalAmount.toFixed(2)}`;
+        }
+    } else if (type === 'PERCENTAGE') {
+        const diff = Math.abs(sum - 100.0);
+        if (diff < 0.01) {
+            helper.className = 'small mt-2 p-2 rounded bg-success-subtle text-success fw-semibold border border-success-subtle';
+            helper.innerHTML = `<i class="bi bi-check-circle-fill me-1"></i> Percentages balanced! 100%`;
+        } else {
+            helper.className = 'small mt-2 p-2 rounded bg-danger-subtle text-danger fw-semibold border border-danger-subtle';
+            helper.innerHTML = `<i class="bi bi-exclamation-triangle-fill me-1"></i> Sum: ${sum.toFixed(1)}% / Required: 100%`;
+        }
+    }
+}
+
+function toggleSelectAllParticipants() {
+    const checkboxes = document.querySelectorAll('.participant-chk');
+    const allChecked = Array.from(checkboxes).every(c => c.checked);
+    checkboxes.forEach(c => { c.checked = !allChecked; });
+    updateSplitHelper();
+}
+
+// -------------------------------------------------------------
+// Expense Submission
+// -------------------------------------------------------------
+async function submitExpenseForm(e) {
+    e.preventDefault();
+    const btn = document.getElementById('btnSubmitExpense');
+
+    const title = (document.getElementById('expenseDesc')?.value || '').trim();
+    const amount = parseFloat(document.getElementById('expenseAmount')?.value);
+    const category = document.getElementById('expenseCategory')?.value || 'General';
+    const payerVal = document.getElementById('expensePayer')?.value;
+    const splitType = document.getElementById('expenseSplitType')?.value || 'EQUAL';
+
+    if (!title) {
+        alert('Please enter an expense title / description.');
+        return;
+    }
+    if (isNaN(amount) || amount <= 0) {
+        alert('Please enter a valid expense amount greater than 0.');
+        return;
+    }
+    if (!payerVal) {
+        alert('Please select who paid for this expense.');
+        return;
+    }
+
+    const paid_from_pool = (payerVal === 'POOL');
+    let payers = [];
+    if (!paid_from_pool) {
+        const payerMemberId = parseInt(payerVal);
+        if (isNaN(payerMemberId)) {
+            alert('Invalid payer selected.');
+            return;
+        }
+        payers = [{ member_id: payerMemberId, amount_paid: amount }];
+    }
+
+    let splits = [];
+    let receipt_items = null;
+
+    if (splitType === 'ITEMIZED') {
+        if (!parsedReceiptItems || parsedReceiptItems.length === 0) {
+            alert('No receipt line items found. Please scan a receipt first or choose another split type.');
+            return;
+        }
+        const unassignedDishes = parsedReceiptItems.filter(i => !i.assigned_members || i.assigned_members.length === 0);
+        if (unassignedDishes.length > 0) {
+            alert(`Please assign at least one member to each dish. "${unassignedDishes[0].name}" has no one assigned.`);
+            return;
+        }
+        receipt_items = parsedReceiptItems;
+    } else {
+        const checkedParticipants = document.querySelectorAll('.participant-chk:checked');
+        if (checkedParticipants.length === 0) {
+            alert('Please select at least one participant sharing this expense.');
+            return;
+        }
+
+        let customSum = 0;
+        checkedParticipants.forEach(chk => {
+            const mid = parseInt(chk.value);
+            const customValInput = document.querySelector(`.participant-custom-val[data-member-id="${mid}"]`);
+            const customVal = customValInput ? parseFloat(customValInput.value) : null;
+
+            if (splitType === 'EXACT') {
+                const exactAmt = customVal || 0;
+                customSum += exactAmt;
+                splits.push({ member_id: mid, owed_amount: exactAmt });
+            } else if (splitType === 'PERCENTAGE') {
+                const pct = customVal || 0;
+                customSum += pct;
+                splits.push({ member_id: mid, share_value: pct });
+            } else if (splitType === 'SHARES') {
+                const sh = (customVal !== null && !isNaN(customVal) && customVal > 0) ? customVal : 1;
+                splits.push({ member_id: mid, share_value: sh });
+            } else {
+                splits.push(mid);
+            }
+        });
+
+        if (splitType === 'EXACT') {
+            if (Math.abs(customSum - amount) > 0.01) {
+                alert(`The sum of exact amounts (${customSum.toFixed(2)}) must equal the total expense amount (${amount.toFixed(2)}).`);
+                return;
+            }
+        } else if (splitType === 'PERCENTAGE') {
+            if (Math.abs(customSum - 100.0) > 0.01) {
+                alert(`The sum of percentages (${customSum.toFixed(1)}%) must equal 100%.`);
+                return;
+            }
+        }
+    }
+
+    if (btn) btn.disabled = true;
+
+    const payload = {
+        title: title,
+        description: title,
+        amount: amount,
+        category: category,
+        split_type: splitType,
+        paid_from_pool: paid_from_pool,
+        payers: payers,
+        splits: splits,
+        receipt_items: receipt_items,
+        tax: parseFloat(document.getElementById('itemizedTax')?.value) || 0,
+        tip: parseFloat(document.getElementById('itemizedTip')?.value) || 0,
+        discount: parseFloat(document.getElementById('itemizedDiscount')?.value) || 0,
+    };
+
+    try {
+        const res = await fetch(`/groups/${GROUP_ID}/expenses`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.success) {
+            window.location.reload();
+        } else {
+            alert(data.error || 'Failed to save expense.');
+            if (btn) btn.disabled = false;
+        }
+    } catch (err) {
+        alert('Error saving expense: ' + err.message);
+        if (btn) btn.disabled = false;
+    }
+}
+
+async function deleteExpense(expenseId) {
+    if (!confirm('Are you sure you want to delete this expense? This will recalculate all balances.')) return;
+    try {
+        const res = await fetch(`/expenses/${expenseId}/delete`, { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+            window.location.reload();
+        } else {
+            alert(data.error || 'Failed to delete expense.');
+        }
+    } catch (err) {
+        alert('Error deleting expense: ' + err.message);
+    }
+}
+
+// -------------------------------------------------------------
+// Kitty Contribution Submission
+// -------------------------------------------------------------
+async function submitFundContribution(e) {
+    e.preventDefault();
+    const btn = e.target ? e.target.querySelector('button[type="submit"]') : null;
+    const member_id = parseInt(document.getElementById('fundMember').value);
+    const amount = parseFloat(document.getElementById('fundAmount').value);
+    const payment_method = document.getElementById('fundMethod').value;
+    const notes = document.getElementById('fundNotes').value.trim();
+
+    if (isNaN(amount) || amount <= 0) {
+        alert('Please enter a valid deposit amount greater than 0.');
+        return;
+    }
+
+    if (btn) btn.disabled = true;
+
+    try {
+        const res = await fetch(`/groups/${GROUP_ID}/fund/contribute`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                member_id: member_id,
+                amount: amount,
+                payment_method: payment_method,
+                notes: notes
+            })
+        });
+        const data = await res.json();
+        if (data.success) {
+            window.location.reload();
+        } else {
+            alert(data.error || 'Failed to record contribution.');
+            if (btn) btn.disabled = false;
+        }
+    } catch (err) {
+        alert('Error recording contribution: ' + err.message);
+        if (btn) btn.disabled = false;
+    }
+}
+
+// -------------------------------------------------------------
+// Member Management: Edit Role / Type & Delete
+// -------------------------------------------------------------
+function openEditMemberModal(btn) {
+    if (!btn) return;
+    const mId = btn.getAttribute('data-member-id');
+    const mName = btn.getAttribute('data-member-name') || '';
+    const mContact = btn.getAttribute('data-member-contact') || '';
+    const mRole = btn.getAttribute('data-member-role') || 'member';
+    const mSponsor = btn.getAttribute('data-member-sponsor') || '';
+
+    document.getElementById('editMemberId').value = mId;
+    document.getElementById('editMemberName').value = mName;
+    document.getElementById('editMemberContact').value = mContact;
+    document.getElementById('editMemberRole').value = mRole;
+
+    const typeSelect = document.getElementById('editMemberType');
+    const sponsorDiv = document.getElementById('editSponsorDiv');
+    const sponsorSelect = document.getElementById('editMemberSponsor');
+
+    if (sponsorSelect) {
+        Array.from(sponsorSelect.options).forEach(opt => {
+            opt.disabled = (opt.value === mId);
+        });
+    }
+
+    if (mSponsor) {
+        typeSelect.value = 'CHILD';
+        sponsorDiv.style.display = 'block';
+        sponsorSelect.value = mSponsor;
+    } else {
+        typeSelect.value = 'ADULT';
+        sponsorDiv.style.display = 'none';
+        sponsorSelect.value = '';
+    }
+
+    const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('editMemberModal'));
+    modal.show();
+}
+
+function toggleEditSponsorVisibility() {
+    const type = document.getElementById('editMemberType')?.value;
+    const sponsorDiv = document.getElementById('editSponsorDiv');
+    if (sponsorDiv) {
+        sponsorDiv.style.display = (type === 'CHILD') ? 'block' : 'none';
+    }
+}
+
+async function submitEditMember(e) {
+    e.preventDefault();
+    const btn = document.getElementById('btnSaveEditMember');
+    const mId = document.getElementById('editMemberId').value;
+    const name = document.getElementById('editMemberName').value.trim();
+    const contact = document.getElementById('editMemberContact').value.trim();
+    const role = document.getElementById('editMemberRole').value;
+    const memberType = document.getElementById('editMemberType').value;
+    const sponsorId = (memberType === 'CHILD') ? document.getElementById('editMemberSponsor').value : null;
+
+    if (!name) {
+        alert('Display name is required.');
+        return;
+    }
+    if (memberType === 'CHILD' && !sponsorId) {
+        alert('Please assign an adult sponsor for this dependent.');
+        return;
+    }
+
+    if (btn) btn.disabled = true;
+
+    try {
+        const res = await fetch(`/groups/${GROUP_ID}/members/${mId}/edit`, {
+            method: 'POST',
+            headers: { 
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            body: JSON.stringify({
+                display_name: name,
+                contact_info: contact,
+                role: role,
+                sponsor_id: sponsorId
+            })
+        });
+        let data = {};
+        try {
+            data = await res.json();
+        } catch (_) {
+            data = { success: false, error: 'Server returned unexpected response.' };
+        }
+        if (data.success) {
+            window.location.reload();
+        } else {
+            alert(data.error || 'Failed to update member.');
+            if (btn) btn.disabled = false;
+        }
+    } catch (err) {
+        alert('Error updating member: ' + err.message);
+        if (btn) btn.disabled = false;
+    }
+}
+
+async function confirmDeleteMember(btn) {
+    if (!btn) return;
+    const mId = btn.getAttribute('data-member-id');
+    const mName = btn.getAttribute('data-member-name') || 'this member';
+
+    if (!confirm(`Are you sure you want to remove "${mName}" from the group?`)) {
+        return;
+    }
+
+    try {
+        const res = await fetch(`/groups/${GROUP_ID}/members/${mId}/delete`, {
+            method: 'POST',
+            headers: { 
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            body: JSON.stringify({})
+        });
+        let data = {};
+        try {
+            data = await res.json();
+        } catch (_) {
+            data = { success: false, error: 'Server returned unexpected response.' };
+        }
+        if (data.success) {
+            window.location.reload();
+        } else {
+            alert(data.error || 'Failed to delete member.');
+        }
+    } catch (err) {
+        alert('Error deleting member: ' + err.message);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    toggleSponsorVisibility();
+
+    // Tab persistence across page reloads
+    const savedTab = window.location.hash || localStorage.getItem(`splitsmart_tab_${GROUP_ID}`);
+    if (savedTab) {
+        const tabBtn = document.querySelector(`button[data-bs-target="${savedTab}"]`);
+        if (tabBtn) {
+            bootstrap.Tab.getOrCreateInstance(tabBtn).show();
+        }
+    }
+    document.querySelectorAll('#groupTabs button[data-bs-toggle="pill"]').forEach(btn => {
+        btn.addEventListener('shown.bs.tab', function(e) {
+            const target = e.target.getAttribute('data-bs-target');
+            if (target) {
+                localStorage.setItem(`splitsmart_tab_${GROUP_ID}`, target);
+                if (history.replaceState) {
+                    history.replaceState(null, null, target);
+                }
+            }
+        });
+    });
+
+    // Wire up live split calculation
+    document.querySelectorAll('.participant-chk').forEach(c => {
+        c.addEventListener('change', updateSplitHelper);
+    });
+    document.querySelectorAll('.participant-custom-val').forEach(i => {
+        i.addEventListener('input', updateSplitHelper);
+    });
+    document.getElementById('expenseAmount')?.addEventListener('input', updateSplitHelper);
+});
+</script>
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+<script src="{{ url_for('static', filename='js/nl_modal.js') }}"></script>
+<script src="{{ url_for('static', filename='js/receipt_itemizer.js') }}"></script>
+{% endblock %}

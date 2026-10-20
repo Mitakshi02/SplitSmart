@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+
+{% block title %}SplitSmart - Create Group{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-7">
+        <div class="card shadow-sm border-0">
+            <div class="card-body p-4">
+                <div class="d-flex align-items-center mb-3">
+                    <div class="bg-primary-subtle text-primary p-2 rounded-circle me-3">
+                        <i class="bi bi-people-fill fs-4"></i>
+                    </div>
+                    <div>
+                        <h3 class="fw-bold mb-0">Create New Group</h3>
+                        <p class="text-muted small mb-0">Start a unified shared ledger for expenses, receipts, and settlements.</p>
+                    </div>
+                </div>
+
+                {% if error %}
+                    <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                        <i class="bi bi-exclamation-triangle-fill me-1"></i> {{ error }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                    </div>
+                {% endif %}
+
+                <form method="POST" action="{{ url_for('groups.create_group_view') }}">
+                    <!-- 1. Group Name (Required) -->
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Group Name <span class="text-danger">*</span></label>
+                        <input type="text" name="name" class="form-control form-control-lg" placeholder="e.g. Goa Trip 2026, Flat 402, Sharma Family" value="{{ data.name if data else '' }}" required autofocus>
+                    </div>
+
+                    <!-- 2. Category Tag Dropdown (Display Metadata) -->
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Category Tag</label>
+                        <select name="category" class="form-select">
+                            <option value="Trip" {% if data and data.category == 'Trip' %}selected{% endif %}>✈️ Trip (Vacation, Tour, Travel)</option>
+                            <option value="Home / Roommates" {% if data and data.category == 'Home / Roommates' %}selected{% endif %}>🏠 Home / Roommates (Flat, Utilities, Groceries)</option>
+                            <option value="Couple" {% if data and data.category == 'Couple' %}selected{% endif %}>💑 Couple (Dates, Shared Living)</option>
+                            <option value="Event" {% if data and data.category == 'Event' %}selected{% endif %}>🎟️ Event (Party, Festival, Wedding)</option>
+                            <option value="Other" {% if not data or not data.category or data.category == 'Other' %}selected{% endif %}>👥 Other / General</option>
+                        </select>
+                        <div class="form-text">Used as a display badge icon on cards. All groups enjoy complete split features, dish itemization, and family rollup options.</div>
+                    </div>
+
+                    <!-- 3. Optional Funding Mode -->
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Funding Mode</label>
+                        <select name="fund_mode" class="form-select">
+                            <option value="INDIVIDUAL" {% if not data or data.fund_mode == 'INDIVIDUAL' %}selected{% endif %}>Individual Pay-as-you-go (Direct member claims)</option>
+                            <option value="COMMON_FUND" {% if data and data.fund_mode == 'COMMON_FUND' %}selected{% endif %}>Pooled Kitty / Common Trip Fund (Pre-funded kitty)</option>
+                        </select>
+                    </div>
+
+                    <!-- Currency (defaulted to INR) -->
+                    <input type="hidden" name="currency" value="INR">
+
+                    <!-- 5. Description (Optional) -->
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Description (Optional)</label>
+                        <textarea name="description" class="form-control" rows="2" placeholder="Brief trip notes or group guidelines...">{{ data.description if data else '' }}</textarea>
+                    </div>
+
+                    <div class="d-flex justify-content-between align-items-center mt-4">
+                        <a href="{{ url_for('groups.list_groups_view') }}" class="btn btn-outline-secondary">
+                            <i class="bi bi-x-circle me-1"></i> Cancel
+                        </a>
+                        <button type="submit" class="btn btn-primary fw-semibold px-4 py-2">
+                            <i class="bi bi-check2-circle me-1"></i> Create Group
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
