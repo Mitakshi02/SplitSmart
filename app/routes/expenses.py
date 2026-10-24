@@ -71,6 +71,20 @@ def create_expense_route(group_id: int):
     splits = data.get("splits")
     receipt_items = data.get("receipt_items")
     paid_from_pool = bool(data.get("paid_from_pool", False))
+    paid_by = data.get("paid_by")
+    payer_val = data.get("payer")
+    if not payer_val and payers and len(payers) == 1 and isinstance(payers[0], dict):
+        payer_val = payers[0].get("member_id")
+
+    if str(paid_by).upper() == "KITTY" or str(payer_val).upper() == "KITTY":
+        paid_by = "KITTY"
+        paid_from_pool = True
+        payers = []
+    elif str(paid_by).upper() == "POOL" or str(payer_val).upper() == "POOL":
+        paid_by = "POOL"
+        paid_from_pool = True
+        payers = []
+
     tax = data.get("tax", 0)
     tip = data.get("tip", 0)
     discount = data.get("discount", 0)
@@ -114,6 +128,7 @@ def create_expense_route(group_id: int):
             splits=splits,
             receipt_items=receipt_items,
             paid_from_pool=paid_from_pool,
+            paid_by=paid_by,
             tax=tax,
             tip=tip,
             discount=discount,
@@ -121,7 +136,17 @@ def create_expense_route(group_id: int):
             expense_date=expense_date,
             currency=currency
         )
-        return jsonify({"success": True, "expense": serialize_for_json(expense)}), 201
+        response_payload = {
+            "success": True,
+            "expense": serialize_for_json(expense)
+        }
+        if "fund_status" in expense:
+            response_payload["fund_status"] = serialize_for_json(expense["fund_status"])
+        elif paid_from_pool:
+            from services.pool_service import get_group_fund_status
+            response_payload["fund_status"] = serialize_for_json(get_group_fund_status(group_id))
+
+        return jsonify(response_payload), 201
     except ValueError as ve:
         return jsonify({"success": False, "error": str(ve)}), 400
     except Exception as e:

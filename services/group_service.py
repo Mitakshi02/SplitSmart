@@ -6,9 +6,12 @@ family unit dependent hierarchies (sponsor_id), and shareable invite code claims
 
 import string
 import secrets
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional, Dict, Any, List, Union
 from db import get_db_cursor, execute_query, execute_write
+from services.balance_engine import to_decimal
+
+CENT = Decimal('0.01')
 
 # Mode and funding mode mappings
 VALID_MODES = {
@@ -287,6 +290,7 @@ def get_group_members(group_id: int) -> List[Dict[str, Any]]:
             gm.sponsor_id, s.display_name AS sponsor_name,
             gm.family_unit_id, f.name AS family_name,
             gm.role, gm.status, gm.joined_at,
+            CASE WHEN gm.sponsor_id IS NOT NULL OR gm.role = 'CHILD' THEN 'CHILD' ELSE 'ADULT' END AS member_type,
             u.email AS user_email, u.phone AS user_phone
         FROM group_members gm
         LEFT JOIN group_members s ON gm.sponsor_id = s.id
@@ -534,13 +538,101 @@ def delete_group_member(group_id: int, member_id: int) -> Dict[str, Any]:
     return {"success": True, "message": "Member removed successfully."}
 
 
+def calculate_prorated_kitty_refunds(group_id: int) -> Dict[str, Any]:
+    """
+    Calculates each contributing member's prorated refund when kitty_balance > 0.
+    Refund = kitty_balance * (member_contribution / total_contributions).
+    """
+    from services.pool_service import get_group_fund_status
+    fund_status = get_group_fund_status(group_id)
+    kitty_balance = to_decimal(fund_status.get("kitty_balance", Decimal('0.00')))
+
+    if kitty_balance <= Decimal('0.00'):
+        return {
+            "kitty_balance": Decimal('0.00'),
+            "total_contributions": Decimal('0.00'),
+            "refunds": []
+        }
+
+    # Fetch total contributed per member across fund_contributions (and kitty_contributions if present)
+    contrib_rows = execute_query(
+        """
+        SELECT fc.member_id, gm.display_name, SUM(fc.amount) as member_total
+        FROM fund_contributions fc
+        JOIN group_members gm ON fc.member_id = gm.id
+        WHERE fc.group_id = %s
+        GROUP BY fc.member_id, gm.display_name
+        HAVING member_total > 0
+        """,
+        (group_id,)
+    ) or []
+
+    # Check if a separate kitty_contributions table exists in DB as well
+    with get_db_cursor() as (cur, _):
+        cur.execute("SHOW TABLES LIKE 'kitty_contributions'")
+        if cur.fetchone():
+            kc_rows = execute_query(
+                """
+                SELECT kc.member_id, gm.display_name, SUM(kc.amount) as member_total
+                FROM kitty_contributions kc
+                JOIN group_members gm ON kc.member_id = gm.id
+                WHERE kc.group_id = %s
+                GROUP BY kc.member_id, gm.display_name
+                HAVING member_total > 0
+                """,
+                (group_id,)
+            ) or []
+            contrib_map = {r["member_id"]: {"member_id": r["member_id"], "display_name": r["display_name"], "member_total": to_decimal(r["member_total"])} for r in contrib_rows}
+            for kr in kc_rows:
+                mid = kr["member_id"]
+                if mid in contrib_map:
+                    contrib_map[mid]["member_total"] += to_decimal(kr["member_total"])
+                else:
+                    contrib_map[mid] = {"member_id": mid, "display_name": kr["display_name"], "member_total": to_decimal(kr["member_total"])}
+            contrib_rows = list(contrib_map.values())
+
+    total_contributions = sum(to_decimal(r["member_total"]) for r in contrib_rows)
+    if total_contributions <= Decimal('0.00'):
+        return {
+            "kitty_balance": kitty_balance,
+            "total_contributions": Decimal('0.00'),
+            "refunds": []
+        }
+
+    refunds = []
+    for r in contrib_rows:
+        m_contrib = to_decimal(r["member_total"])
+        m_refund = (kitty_balance * (m_contrib / total_contributions)).quantize(CENT, rounding=ROUND_HALF_UP)
+        refunds.append({
+            "member_id": r["member_id"],
+            "display_name": r["display_name"],
+            "contribution": m_contrib,
+            "refund_amount": m_refund
+        })
+
+    # Penny reconciliation so sum of refunds equals kitty_balance exactly
+    allocated_sum = sum(ref["refund_amount"] for ref in refunds)
+    discrepancy = kitty_balance - allocated_sum
+    if discrepancy != Decimal('0.00') and refunds:
+        top_contributor = max(refunds, key=lambda x: x["contribution"])
+        top_contributor["refund_amount"] += discrepancy
+
+    return {
+        "kitty_balance": kitty_balance,
+        "total_contributions": total_contributions,
+        "refunds": refunds
+    }
+
+
 def delete_group(group_id: int, user_id: int) -> Dict[str, Any]:
     """
-    Safely deletes a group if and only if:
+    Safely deletes a group:
     1. user_id is the group creator/admin (created_by == user_id or admin role).
-    2. All debts within the group are fully settled (all net balances == 0).
-    Raises ValueError with 'Cannot delete group: Settle all outstanding debts first.' if debts remain.
-    Raises PermissionError if unauthorized.
+    2. If kitty_balance > 0, calculates each contributing member's prorated refund:
+       Refund = kitty_balance * (member_contribution / total_contributions).
+       Automatically records the refund settlements and clears the kitty ledger.
+    3. Verifies all remaining peer-to-peer debts within the group are fully settled (all net balances == 0).
+    4. Explicitly deletes all child records (settlements, kitty records, expenses, members) before deleting group.
     """
     group = get_group_by_id(group_id)
     if not group:
@@ -557,7 +649,22 @@ def delete_group(group_id: int, user_id: int) -> Dict[str, Any]:
         if not admin_check:
             raise PermissionError("Unauthorized: Only the group creator or admin can delete this group.")
 
-    # 2. Safeguard check: verify all net balances are 0
+    # 2. Strict guard on Kitty balance and unsettled equity
+    from services.pool_service import get_group_fund_status
+    fund_status = get_group_fund_status(group_id)
+    kitty_bal = to_decimal(fund_status.get("kitty_balance", Decimal('0.00')))
+    member_equity_map = fund_status.get("member_equity", {})
+    members_breakdown = fund_status.get("members_equity_breakdown", [])
+    has_unsettled_equity = (
+        abs(kitty_bal) >= Decimal('0.01') or
+        any(abs(to_decimal(eq)) >= Decimal('0.01') for eq in member_equity_map.values()) or
+        any(abs(to_decimal(m.get("remaining_equity", Decimal('0.00')))) >= Decimal('0.01') for m in members_breakdown) or
+        fund_status.get("has_deficit", False)
+    )
+    if has_unsettled_equity:
+        raise ValueError("Cannot delete group: Please disband the Kitty and refund/settle all member equity balances first.")
+
+    # 3. Safeguard check: verify all remaining peer-to-peer net balances are 0
     from services.settlement_service import get_group_balances
     balances = get_group_balances(group_id)
     effective_balances = balances.get("effective_balances", {})
@@ -567,7 +674,7 @@ def delete_group(group_id: int, user_id: int) -> Dict[str, Any]:
     if has_unsettled or len(settlement_plan) > 0:
         raise ValueError("Cannot delete group: Settle all outstanding debts first.")
 
-    # 3. Perform cascade deletion within database transaction
+    # 4. Perform cascade deletion within database transaction
     with get_db_cursor() as (cur, conn):
         cur.execute("DELETE FROM settlements WHERE group_id = %s", (group_id,))
         cur.execute("""
@@ -591,11 +698,25 @@ def delete_group(group_id: int, user_id: int) -> Dict[str, Any]:
             WHERE expense_id IN (SELECT id FROM expenses WHERE group_id = %s)
         """, (group_id,))
         cur.execute("DELETE FROM expenses WHERE group_id = %s", (group_id,))
+
+        # Explicitly delete child Kitty records prior to deleting the group record
+        cur.execute("SHOW TABLES LIKE 'kitty_contributions'")
+        if cur.fetchone():
+            cur.execute("DELETE FROM kitty_contributions WHERE group_id = %s", (group_id,))
+
+        cur.execute("SHOW TABLES LIKE 'kitty_transactions'")
+        if cur.fetchone():
+            cur.execute("DELETE FROM kitty_transactions WHERE group_id = %s", (group_id,))
+
         cur.execute("DELETE FROM fund_contributions WHERE group_id = %s", (group_id,))
         cur.execute("DELETE FROM group_members WHERE group_id = %s", (group_id,))
         cur.execute("DELETE FROM family_units WHERE group_id = %s", (group_id,))
         cur.execute("DELETE FROM `groups` WHERE id = %s", (group_id,))
         conn.commit()
 
-    return {"success": True, "message": "Group deleted successfully", "group_id": group_id}
+    return {
+        "success": True,
+        "message": "Group deleted successfully",
+        "group_id": group_id
+    }
 

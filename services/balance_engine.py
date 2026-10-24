@@ -127,14 +127,18 @@ def rollup_sponsor_balances(
 
 def calculate_pool_equity(
     contributions: List[Dict[str, Any]],
-    pool_expenses_by_member: List[Dict[str, Any]]
+    pool_expenses_by_member: List[Dict[str, Any]],
+    sponsor_map: Optional[Dict[Any, Any]] = None
 ) -> Dict[str, Any]:
     """
     Tracks collective fund kitty balance and individual member remaining equity stakes.
+    When sponsor_map is provided, dependent consumption rolls up into their designated sponsor,
+    and dependent equity stake is marked as 0.00.
     
     Args:
         contributions: List of dicts with 'member_id' and 'amount'
         pool_expenses_by_member: List of dicts with 'member_id' and 'amount' (consumed from kitty)
+        sponsor_map: Optional Dict mapping dependent member_id -> sponsor_member_id
         
     Returns:
         Dict with:
@@ -166,13 +170,39 @@ def calculate_pool_equity(
 
     kitty_balance = (total_contributed - total_spent).quantize(CENT, rounding=ROUND_HALF_UP)
 
-    # Member equity = Contribution - Consumed from pool
+    # Helper to resolve root sponsor if sponsor_map provided
+    def find_root(mid: Any) -> Any:
+        if not sponsor_map:
+            return mid
+        curr = mid
+        visited = set()
+        while curr in sponsor_map and sponsor_map[curr] and curr not in visited:
+            visited.add(curr)
+            curr = sponsor_map[curr]
+        return curr
+
+    # Pre-calculate personal consumed and roll up dependent consumed into root sponsor
+    personal_consumed: Dict[Any, Decimal] = {}
+    sponsor_dep_consumed: Dict[Any, Decimal] = {}
+    for mid, amt in member_consumed.items():
+        root = find_root(mid)
+        if sponsor_map and root != mid:
+            sponsor_dep_consumed[root] = sponsor_dep_consumed.get(root, Decimal('0.00')) + amt
+        else:
+            personal_consumed[mid] = amt
+
+    # Member equity = Contribution - Consumed from pool (with dependent rollups)
     member_equity: Dict[Any, Decimal] = {}
     for mid in all_members:
-        contrib = member_contributions.get(mid, Decimal('0.00'))
-        consumed = member_consumed.get(mid, Decimal('0.00'))
-        equity = contrib - consumed
-        member_equity[mid] = equity.quantize(CENT, rounding=ROUND_HALF_UP)
+        root = find_root(mid)
+        if sponsor_map and root != mid:
+            # Dependent has no separate equity stake (rolled into sponsor)
+            member_equity[mid] = Decimal('0.00')
+        else:
+            contrib = member_contributions.get(mid, Decimal('0.00'))
+            consumed = personal_consumed.get(mid, member_consumed.get(mid, Decimal('0.00'))) + sponsor_dep_consumed.get(mid, Decimal('0.00'))
+            equity = contrib - consumed
+            member_equity[mid] = equity.quantize(CENT, rounding=ROUND_HALF_UP)
 
     return {
         "total_contributed": total_contributed.quantize(CENT, rounding=ROUND_HALF_UP),

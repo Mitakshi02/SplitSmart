@@ -21,7 +21,13 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from app import create_app
 from db import execute_query
 from services.auth_service import register_user
-from services.group_service import create_group, add_group_member
+from services.group_service import (
+    create_group,
+    add_group_member,
+    delete_group,
+    calculate_prorated_kitty_refunds,
+    get_group_members
+)
 from services.expense_service import (
     create_expense,
     delete_expense,
@@ -439,6 +445,368 @@ class TestExpensesAndSettlements(unittest.TestCase):
                 splits=[m_id],
                 payers=[]
             )
+
+    def test_spend_from_kitty_functionality(self):
+        """
+        Verifies:
+        1. When paid_by == 'KITTY', group must be configured for common fund / pooled kitty.
+        2. Expense amount cannot exceed remaining kitty balance (returns HTTP 400 / ValueError).
+        3. Successful Kitty expense sets funding_source='kitty', paid_from_pool=True.
+        4. No rows inserted into expense_payers.
+        5. expense_splits are recorded and deduct from member pool equity.
+        6. HTTP response returns updated fund_status.
+        """
+        ts = int(time.time()) + 400
+        client = self.client
+
+        # Register 2 users
+        u1 = register_user(f"KittyA_{ts}", f"kittya_{ts}@test.com", f"+919966{ts % 10000:04d}", "Password@123")
+        u2 = register_user(f"KittyB_{ts}", f"kittyb_{ts}@test.com", f"+919977{ts % 10000:04d}", "Password@123")
+
+        # 1. Non-kitty group attempt
+        regular_grp = create_group(created_by=u1["id"], name=f"Regular Group {ts}", funding_mode="individual")
+        r_grp_id = regular_grp["id"]
+        rm1 = execute_query("SELECT id FROM group_members WHERE group_id = %s", (r_grp_id,), fetchone=True)["id"]
+
+        with client.session_transaction() as sess:
+            sess["user_id"] = u1["id"]
+
+        resp_invalid_mode = client.post(
+            f"/groups/{r_grp_id}/expenses",
+            json={
+                "title": "Invalid Kitty Spend",
+                "amount": 50.0,
+                "paid_by": "KITTY",
+                "splits": [rm1]
+            }
+        )
+        self.assertEqual(resp_invalid_mode.status_code, 400)
+        self.assertIn("Group is not configured for Common Fund", resp_invalid_mode.get_json()["error"])
+
+        # 2. Pooled Kitty group
+        kitty_grp = create_group(created_by=u1["id"], name=f"Kitty Group {ts}", funding_mode="pooled_kitty", currency="INR")
+        k_grp_id = kitty_grp["id"]
+        km1 = execute_query("SELECT id FROM group_members WHERE group_id = %s AND user_id = %s", (k_grp_id, u1["id"]), fetchone=True)["id"]
+        km2_res = add_group_member(group_id=k_grp_id, display_name="Member Two", user_id=u2["id"])
+        km2 = km2_res["id"]
+
+        # Spend with 0 kitty balance -> should fail with 400
+        resp_zero_balance = client.post(
+            f"/groups/{k_grp_id}/expenses",
+            json={
+                "title": "Coffee from empty kitty",
+                "amount": 100.0,
+                "paid_by": "KITTY",
+                "splits": [km1, km2]
+            }
+        )
+        self.assertEqual(resp_zero_balance.status_code, 400)
+        self.assertIn("exceeds remaining kitty balance", resp_zero_balance.get_json()["error"])
+
+        # 3. Deposit ₹500 into kitty (₹250 from each member)
+        record_contribution(k_grp_id, km1, Decimal('250.00'))
+        record_contribution(k_grp_id, km2, Decimal('250.00'))
+
+        status_before = get_group_fund_status(k_grp_id)
+        self.assertEqual(status_before["kitty_balance"], Decimal('500.00'))
+
+        # 4. Attempt to spend ₹600 (exceeds ₹500 balance) -> 400
+        resp_overspend = client.post(
+            f"/groups/{k_grp_id}/expenses",
+            json={
+                "title": "Overspending Kitty",
+                "amount": 600.0,
+                "paid_by": "KITTY",
+                "splits": [km1, km2]
+            }
+        )
+        self.assertEqual(resp_overspend.status_code, 400)
+        self.assertIn("exceeds remaining kitty balance", resp_overspend.get_json()["error"])
+
+        # 5. Spend ₹200 from Kitty (valid: 200 <= 500)
+        resp_success = client.post(
+            f"/groups/{k_grp_id}/expenses",
+            json={
+                "title": "Lunch from Kitty",
+                "amount": 200.0,
+                "paid_by": "KITTY",
+                "splits": [km1, km2]
+            }
+        )
+        self.assertEqual(resp_success.status_code, 201)
+        res_data = resp_success.get_json()
+        self.assertTrue(res_data["success"])
+        self.assertIn("fund_status", res_data)
+        self.assertEqual(res_data["fund_status"]["kitty_balance"], 300.0)
+
+        exp_id = res_data["expense"]["id"]
+
+        # 6. Verify database records:
+        # Check expense row
+        exp_row = execute_query("SELECT * FROM expenses WHERE id = %s", (exp_id,), fetchone=True)
+        self.assertEqual(exp_row["funding_source"], "kitty")
+
+        # Check expense_payers: MUST BE EMPTY (no individual member payers)
+        payers = execute_query("SELECT * FROM expense_payers WHERE id = %s", (exp_id,))
+        self.assertEqual(len(payers), 0)
+
+        # Check expense_splits: MUST HAVE 2 rows of ₹100 each
+        splits = execute_query("SELECT * FROM expense_splits WHERE expense_id = %s ORDER BY member_id ASC", (exp_id,))
+        self.assertEqual(len(splits), 2)
+        self.assertEqual(splits[0]["owed_amount"], Decimal('100.00'))
+        self.assertEqual(splits[1]["owed_amount"], Decimal('100.00'))
+
+        # Verify pool equity deducted
+        status_after = get_group_fund_status(k_grp_id)
+        self.assertEqual(status_after["kitty_balance"], Decimal('300.00'))
+        self.assertEqual(status_after["member_equity"][km1], Decimal('150.00'))
+        self.assertEqual(status_after["member_equity"][km2], Decimal('150.00'))
+
+    def test_restrict_dependents_from_kitty_contribution(self):
+        """
+        Verifies:
+        1. In group members, dependents have member_type == 'CHILD' and sponsor_id is not None.
+        2. Backend API rejects contribution from dependent with HTTP 400.
+        3. Service rejects direct contribution call with ValueError.
+        """
+        ts = int(time.time()) + 600
+        client = self.client
+
+        # Register sponsor user
+        sponsor_user = register_user(f"Sponsor_{ts}", f"sponsor_{ts}@test.com", f"+919988{ts % 10000:04d}", "Password@123")
+        grp = create_group(created_by=sponsor_user["id"], name=f"Dependent Kitty Test {ts}", funding_mode="pooled_kitty")
+        grp_id = grp["id"]
+
+        sponsor_m = execute_query("SELECT id FROM group_members WHERE group_id = %s AND user_id = %s", (grp_id, sponsor_user["id"]), fetchone=True)["id"]
+
+        # Add child dependent sponsored by sponsor_m
+        child_res = add_group_member(group_id=grp_id, display_name="Little Aarav", role="CHILD", sponsor_id=sponsor_m)
+        child_id = child_res["id"]
+
+        # Verify member list has member_type == 'CHILD'
+        members = get_group_members(grp_id)
+        child_member = next(m for m in members if m["id"] == child_id)
+        self.assertEqual(child_member["member_type"], "CHILD")
+        self.assertEqual(child_member["sponsor_id"], sponsor_m)
+
+        with client.session_transaction() as sess:
+            sess["user_id"] = sponsor_user["id"]
+
+        # 1. API contribution rejection on dependent
+        resp = client.post(
+            f"/groups/{grp_id}/fund/contribute",
+            json={
+                "member_id": child_id,
+                "amount": 200.0,
+                "payment_method": "UPI"
+            }
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Dependents cannot contribute directly to the Kitty", resp.get_json()["error"])
+
+        # 2. Service level rejection on dependent
+        with self.assertRaises(ValueError) as ctx:
+            record_contribution(group_id=grp_id, member_id=child_id, amount=Decimal('100.00'))
+        self.assertIn("Dependents cannot contribute directly to the Kitty", str(ctx.exception))
+
+        # 3. Adult sponsor can contribute successfully
+        adult_resp = client.post(
+            f"/groups/{grp_id}/fund/contribute",
+            json={
+                "member_id": sponsor_m,
+                "amount": 500.0,
+                "payment_method": "UPI"
+            }
+        )
+        self.assertEqual(adult_resp.status_code, 201)
+
+    def test_delete_group_with_active_kitty_and_prorated_refunds(self):
+        """
+        Verifies:
+        1. When a group has an active Kitty balance, calculate_prorated_kitty_refunds
+           correctly determines each member's refund:
+           Refund = kitty_balance * (member_contribution / total_contributions).
+        2. Deleting the group automatically records the refund settlements, clears the ledger,
+           and cascade-deletes all child kitty records without foreign key errors.
+        """
+        ts = int(time.time()) + 700
+        client = self.client
+
+        u1 = register_user(f"Admin_{ts}", f"admin_{ts}@test.com", f"+919911{ts % 10000:04d}", "Password@123")
+        u2 = register_user(f"User2_{ts}", f"user2_{ts}@test.com", f"+919922{ts % 10000:04d}", "Password@123")
+
+        grp = create_group(created_by=u1["id"], name=f"Active Kitty Delete Grp {ts}", funding_mode="pooled_kitty")
+        grp_id = grp["id"]
+
+        m1 = execute_query("SELECT id FROM group_members WHERE group_id = %s AND user_id = %s", (grp_id, u1["id"]), fetchone=True)["id"]
+        m2_res = add_group_member(group_id=grp_id, display_name="Partner", user_id=u2["id"])
+        m2 = m2_res["id"]
+
+        # Member 1 deposits ₹400, Member 2 deposits ₹200 (Total: ₹600)
+        record_contribution(grp_id, m1, Decimal('400.00'))
+        record_contribution(grp_id, m2, Decimal('200.00'))
+
+        # Spend ₹300 from kitty (Remaining kitty balance = ₹300)
+        create_expense(
+            group_id=grp_id,
+            created_by=m1,
+            description="Pool Cab",
+            amount=Decimal('300.00'),
+            split_type="EQUAL",
+            splits=[m1, m2],
+            paid_by="KITTY"
+        )
+
+        status = get_group_fund_status(grp_id)
+        self.assertEqual(status["kitty_balance"], Decimal('300.00'))
+
+        # Check prorated refunds:
+        # m1 refund = 300 * (400 / 600) = 200.00
+        # m2 refund = 300 * (200 / 600) = 100.00
+        refunds_data = calculate_prorated_kitty_refunds(grp_id)
+        self.assertEqual(refunds_data["kitty_balance"], Decimal('300.00'))
+        self.assertEqual(refunds_data["total_contributions"], Decimal('600.00'))
+
+        m1_ref = next(r for r in refunds_data["refunds"] if r["member_id"] == m1)
+        m2_ref = next(r for r in refunds_data["refunds"] if r["member_id"] == m2)
+        self.assertEqual(m1_ref["refund_amount"], Decimal('200.00'))
+        self.assertEqual(m2_ref["refund_amount"], Decimal('100.00'))
+
+        with client.session_transaction() as sess:
+            sess["user_id"] = u1["id"]
+
+        # 1. Deletion attempt with active Kitty balance MUST be blocked
+        del_blocked_resp = client.post(f"/groups/{grp_id}/delete", headers={"Accept": "application/json"})
+        self.assertEqual(del_blocked_resp.status_code, 400)
+        blocked_json = del_blocked_resp.get_json()
+        self.assertIn("Please disband the Kitty and refund/settle all member equity balances first", blocked_json.get("error", ""))
+
+        # 2. Call Disband & Refund Kitty routine
+        disband_resp = client.post(f"/groups/{grp_id}/kitty/disband", headers={"Accept": "application/json"})
+        self.assertEqual(disband_resp.status_code, 200)
+        disband_json = disband_resp.get_json()
+        self.assertTrue(disband_json["success"])
+        self.assertEqual(disband_json["kitty_balance"], 0.0)
+        payouts = disband_json["payout_steps"]
+        self.assertTrue(len(payouts) >= 2)
+
+        # Verify fund status now shows 0.00 balance and all equities 0.00
+        status_after_disband = get_group_fund_status(grp_id)
+        self.assertEqual(status_after_disband["kitty_balance"], Decimal('0.00'))
+        for eq in status_after_disband["member_equity"].values():
+            self.assertEqual(eq, Decimal('0.00'))
+
+        # 3. Now delete group via HTTP endpoint MUST succeed
+        del_resp = client.post(f"/groups/{grp_id}/delete", headers={"Accept": "application/json"})
+        self.assertEqual(del_resp.status_code, 200)
+        res_json = del_resp.get_json()
+        self.assertTrue(res_json["success"])
+
+        # Verify group is completely deleted from DB
+        grp_check = execute_query("SELECT id FROM `groups` WHERE id = %s", (grp_id,), fetchone=True)
+        self.assertIsNone(grp_check)
+
+        # Verify child records deleted
+        fc_check = execute_query("SELECT id FROM fund_contributions WHERE group_id = %s", (grp_id,))
+        self.assertEqual(len(fc_check), 0)
+
+    def test_kitty_dependent_family_equity_rollup(self):
+        """
+        Verifies:
+        1. Exclude dependent members (member_type == 'CHILD' or sponsor_id IS NOT NULL)
+           from rendering as independent rows in the equity table.
+        2. Roll up the dependent's consumed amount into their designated sponsor_id:
+           Sponsor Consumed = Sponsor Personal Consumed + SUM(Dependents Consumed)
+           Sponsor Remaining Equity = Sponsor Deposited - Sponsor Consumed.
+        3. Ensure no dependent shows a separate 'Deficit!' badge.
+        """
+        ts = int(time.time()) + 800
+        u1 = register_user(f"Sponsor_{ts}", f"sponsor_{ts}@test.com", f"+919933{ts % 10000:04d}", "Password@123")
+        u2 = register_user(f"Mitakshi_{ts}", f"mitakshi_{ts}@test.com", f"+919944{ts % 10000:04d}", "Password@123")
+
+        grp = create_group(created_by=u1["id"], name=f"Kitty Family Rollup {ts}", funding_mode="pooled_kitty")
+        grp_id = grp["id"]
+
+        m_sponsor = execute_query("SELECT id FROM group_members WHERE group_id = %s AND user_id = %s", (grp_id, u1["id"]), fetchone=True)["id"]
+        m_child_res = add_group_member(group_id=grp_id, display_name="Aarav (Child)", role="CHILD", sponsor_id=m_sponsor)
+        m_child = m_child_res["id"]
+        m_mitakshi_res = add_group_member(group_id=grp_id, display_name="Mitakshi", user_id=u2["id"])
+        m_mitakshi = m_mitakshi_res["id"]
+
+        # Sponsor deposits 1500, Mitakshi deposits 1000
+        record_contribution(grp_id, m_sponsor, Decimal('1500.00'))
+        record_contribution(grp_id, m_mitakshi, Decimal('1000.00'))
+
+        # Kitty expense: 600 split equally among Sponsor (200), Child (200), Mitakshi (200)
+        create_expense(
+            group_id=grp_id,
+            created_by=m_sponsor,
+            description="Theme Park Entry",
+            amount=Decimal('600.00'),
+            split_type="EQUAL",
+            splits=[m_sponsor, m_child, m_mitakshi],
+            paid_by="KITTY"
+        )
+
+        status = get_group_fund_status(grp_id)
+        self.assertEqual(status["kitty_balance"], Decimal('1900.00'))
+        self.assertEqual(status["total_contributed"], Decimal('2500.00'))
+        self.assertEqual(status["total_spent"], Decimal('600.00'))
+
+        # Breakdown rows check: child must be excluded!
+        breakdown = status["members_equity_breakdown"]
+        breakdown_ids = [row["member_id"] for row in breakdown]
+        self.assertNotIn(m_child, breakdown_ids)
+        self.assertIn(m_sponsor, breakdown_ids)
+        self.assertIn(m_mitakshi, breakdown_ids)
+
+        # Check Sponsor's rolled up numbers:
+        # Personal consumed = 200, Dependent consumed = 200, Sponsor consumed = 400
+        # Sponsor equity = 1500 - 400 = 1100
+        sponsor_row = next(r for r in breakdown if r["member_id"] == m_sponsor)
+        self.assertEqual(sponsor_row["personal_consumed"], Decimal('200.00'))
+        self.assertEqual(sponsor_row["dependents_consumed"], Decimal('200.00'))
+        self.assertEqual(sponsor_row["consumed"], Decimal('400.00'))
+        self.assertEqual(sponsor_row["remaining_equity"], Decimal('1100.00'))
+        self.assertFalse(sponsor_row["is_deficit"])
+
+        # Check Mitakshi's numbers:
+        mitakshi_row = next(r for r in breakdown if r["member_id"] == m_mitakshi)
+        self.assertEqual(mitakshi_row["consumed"], Decimal('200.00'))
+        self.assertEqual(mitakshi_row["remaining_equity"], Decimal('800.00'))
+        self.assertFalse(mitakshi_row["is_deficit"])
+
+        # Ensure no deficit anywhere
+        self.assertFalse(status["has_deficit"])
+        self.assertEqual(len(status["deficits"]), 0)
+
+        # Check Deficit Rollup:
+        # Sponsor deposited 1500. Let's add an expense of 1400 split between Sponsor (700) and Child (700).
+        # Total Sponsor consumed becomes: 400 + 1400 = 1800.
+        # Sponsor equity = 1500 - 1800 = -300 (Deficit!).
+        create_expense(
+            group_id=grp_id,
+            created_by=m_sponsor,
+            description="Luxury Resort Stay",
+            amount=Decimal('1400.00'),
+            split_type="EQUAL",
+            splits=[m_sponsor, m_child],
+            paid_by="KITTY"
+        )
+
+        deficit_status = get_group_fund_status(grp_id)
+        self.assertTrue(deficit_status["has_deficit"])
+        # Deficit belongs to sponsor, NOT the child!
+        self.assertIn(m_sponsor, deficit_status["deficits"])
+        self.assertNotIn(m_child, deficit_status["deficits"])
+        self.assertEqual(deficit_status["deficits"][m_sponsor], Decimal('-300.00'))
+
+        # Child still not in breakdown table
+        new_breakdown_ids = [r["member_id"] for r in deficit_status["members_equity_breakdown"]]
+        self.assertNotIn(m_child, new_breakdown_ids)
+        new_sponsor_row = next(r for r in deficit_status["members_equity_breakdown"] if r["member_id"] == m_sponsor)
+        self.assertTrue(new_sponsor_row["is_deficit"])
+        self.assertEqual(new_sponsor_row["remaining_equity"], Decimal('-300.00'))
 
 
 if __name__ == "__main__":

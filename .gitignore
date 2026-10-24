@@ -22,3 +22,7 @@ htmlcov/
 # Operating system files
 .DS_Store
 Thumbs.db
+
+# Runtime uploads
+app/static/uploads/receipt_*
+app/static/uploads/Project_Report_Route_Risk_Planner.pdf

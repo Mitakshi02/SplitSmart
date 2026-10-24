@@ -182,11 +182,14 @@ def get_group_balances(group_id: int) -> Dict[str, Any]:
     """
     splits = execute_query(splits_query, (group_id,)) or []
 
-    # 4. Fetch completed settlements
+    # 4. Fetch completed peer-to-peer settlements
+    # Kitty refunds settle pool equity and should not distort peer-to-peer debt balances
     settlements_query = """
         SELECT payer_member_id, payee_member_id, amount, status
         FROM settlements
         WHERE group_id = %s AND status = 'completed'
+          AND (payment_reference IS NULL OR payment_reference != 'KITTY_DISBAND')
+          AND (payment_method IS NULL OR payment_method != 'Kitty Refund')
     """
     settlements = execute_query(settlements_query, (group_id,)) or []
 

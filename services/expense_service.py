@@ -52,6 +52,7 @@ def create_expense(
     splits: Optional[List[Dict[str, Any]]] = None,
     receipt_items: Optional[List[Dict[str, Any]]] = None,
     paid_from_pool: bool = False,
+    paid_by: Optional[str] = None,
     tax: Union[Decimal, str, float] = Decimal('0.00'),
     tip: Union[Decimal, str, float] = Decimal('0.00'),
     discount: Union[Decimal, str, float] = Decimal('0.00'),
@@ -72,6 +73,7 @@ def create_expense(
         splits: List of dicts: [{'member_id': int, 'owed_amount' or 'share_value': Decimal}]
         receipt_items: Optional line items for ITEMIZED split
         paid_from_pool: If True, funded by common kitty pool (no individual payers)
+        paid_by: Optional string indicator ('KITTY', 'POOL', etc.)
         tax, tip, discount: Adjustments for itemized bill calculations
         category: Expense category ('General', 'Food', 'Travel', etc.)
         expense_date: Optional date of expense (defaults to today)
@@ -102,12 +104,26 @@ def create_expense(
     if not group:
         raise ValueError(f"Group with ID {group_id} not found.")
 
+    if paid_by and str(paid_by).upper() in ("KITTY", "POOL"):
+        paid_from_pool = True
+
     funding_source = "individual"
     if paid_from_pool:
         fund_mode = str(group.get("funding_mode", "")).strip().lower()
-        if fund_mode not in ("pooled_kitty", "common_fund", "common trip fund"):
+        if fund_mode not in ("pooled_kitty", "common_fund", "common trip fund", "kitty"):
             raise ValueError("Cannot pay from pool: Group is not configured for Common Fund / Pooled Kitty.")
         funding_source = "kitty"
+
+        # Validate remaining kitty balance if explicitly paid by Kitty
+        if paid_by and str(paid_by).upper() == "KITTY":
+            from services.pool_service import get_group_fund_status
+            fund_status = get_group_fund_status(group_id)
+            kitty_balance = to_decimal(fund_status.get("kitty_balance", 0.0))
+            if total_amount > kitty_balance:
+                raise ValueError(
+                    f"Cannot spend from Kitty: Expense amount ({group.get('currency', 'INR')} {total_amount:.2f}) "
+                    f"exceeds remaining kitty balance ({group.get('currency', 'INR')} {kitty_balance:.2f})."
+                )
 
     # 2. Validate Payers (if not paid from pool)
     validated_payers: List[Dict[str, Any]] = []

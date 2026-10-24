@@ -103,6 +103,7 @@ def group_detail_view(group_id: int):
     balances = get_group_balances(group_id)
     settlements = get_group_settlements(group_id)
     fund_status = get_group_fund_status(group_id) if group.get("funding_mode") in ("pooled_kitty", "common_fund", "kitty") else None
+    kitty_balance = fund_status.get("kitty_balance", 0.0) if fund_status else 0.0
 
     if request.is_json:
         return jsonify({
@@ -113,7 +114,8 @@ def group_detail_view(group_id: int):
             "expenses": expenses,
             "balances": balances,
             "settlements": settlements,
-            "fund_status": fund_status
+            "fund_status": fund_status,
+            "kitty_balance": kitty_balance
         }), 200
 
     return render_template(
@@ -125,7 +127,8 @@ def group_detail_view(group_id: int):
         expenses=expenses,
         balances=balances,
         settlements=settlements,
-        fund_status=fund_status
+        fund_status=fund_status,
+        kitty_balance=kitty_balance
     )
 
 
@@ -318,26 +321,32 @@ def join_group_view(invite_code: str):
 def delete_group_view(group_id: int):
     """
     Safely deletes a group if all balances are settled and user is the creator/admin.
+    Automatically handles prorated refunds when an active kitty balance exists.
     """
+    wants_json = request.is_json or "application/json" in request.headers.get("Accept", "") or "application/json" in request.headers.get("Content-Type", "")
     user_id = session.get("user_id")
     try:
-        delete_group(group_id, user_id)
+        res = delete_group(group_id, user_id)
         flash("Group deleted successfully", "success")
-        if request.is_json:
-            return jsonify({"success": True, "message": "Group deleted successfully"}), 200
+        if wants_json:
+            return jsonify({
+                "success": True,
+                "message": "Group deleted successfully",
+                "prorated_refunds": res.get("prorated_refunds", [])
+            }), 200
         return redirect(url_for("groups.list_groups_view"))
     except PermissionError as pe:
-        if request.is_json:
+        if wants_json:
             return jsonify({"error": str(pe)}), 403
         flash(str(pe), "danger")
         return redirect(url_for("groups.group_detail_view", group_id=group_id))
     except ValueError as ve:
-        if request.is_json:
+        if wants_json:
             return jsonify({"error": str(ve)}), 400
         flash(str(ve), "danger")
         return redirect(url_for("groups.group_detail_view", group_id=group_id))
     except Exception as err:
-        if request.is_json:
+        if wants_json:
             return jsonify({"error": f"Failed to delete group: {str(err)}"}), 500
         flash(f"Failed to delete group: {str(err)}", "danger")
         return redirect(url_for("groups.group_detail_view", group_id=group_id))
